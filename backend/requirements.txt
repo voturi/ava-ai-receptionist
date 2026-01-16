@@ -1,0 +1,39 @@
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# Database
+sqlalchemy==2.0.23
+alembic==1.13.1
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+
+# Supabase
+supabase==2.3.4
+
+# Redis
+redis==5.0.1
+hiredis==2.3.2
+
+# AI/ML
+openai==1.10.0
+
+# Telephony
+twilio==8.11.0
+
+# External Services - we'll add these later when needed
+# deepgram-sdk==3.0.0
+# sendgrid==6.11.0
+# stripe==7.10.0
+
+# Utilities
+python-dotenv==1.0.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+httpx==0.25.2
+
+# Logging & Monitoring
+sentry-sdk[fastapi]==1.40.0
+python-json-logger==2.0.7
+ 
