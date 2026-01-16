@@ -14,12 +14,14 @@ async def handle_incoming_call(business_id: str, request: Request):
     caller_phone = form.get("From")
     call_id = form.get("CallSid")
     print(f"""
-    =========================================
-    Incoming call from {caller_phone}
-    Call ID: {call_id}
+    ═══════════════════════════════════════
+    📞 INCOMING CALL
+    ═══════════════════════════════════════
     Business ID: {business_id}
-    Time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    =========================================
+    Caller: {caller_phone}
+    Call SID: {call_sid}
+    Time: {datetime.now().strftime('%H:%M:%S')}
+    ═══════════════════════════════════════
     """)
 
     #Create Twilm response
