@@ -6,6 +6,7 @@ import os
 
 #Import Routers
 from app.api.v1 import voice
+from app.api.v1 import calls
 
 # Load environment variables
 load_dotenv()
