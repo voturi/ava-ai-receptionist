@@ -6,9 +6,10 @@ import type { Call } from '../../lib/api';
 interface CallCardProps {
   call: Call;
   index: number;
+  onView: (call: Call) => void;
 }
 
-const CallCard = ({ call, index }: CallCardProps) => {
+const CallCard = ({ call, index, onView }: CallCardProps) => {
   const statusConfig = {
     booked: { 
       color: 'cyan', 
@@ -93,7 +94,10 @@ const CallCard = ({ call, index }: CallCardProps) => {
           {config.label}
         </div>
 
-        <button className="opacity-0 group-hover:opacity-100 px-4 py-2 glass glass-hover rounded-lg text-gray-200 text-sm font-semibold transition-all">
+        <button
+          onClick={() => onView(call)}
+          className="opacity-0 group-hover:opacity-100 px-4 py-2 glass glass-hover rounded-lg text-gray-200 text-sm font-semibold transition-all"
+        >
           View
         </button>
       </div>

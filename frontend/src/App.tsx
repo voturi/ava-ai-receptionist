@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Phone, Calendar, TrendingUp, Clock } from 'lucide-react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { StatCard } from './components/dashboard/StatCard';
 import CallCard from './components/dashboard/CallCard';
 import { api, type Call, type Stats } from './lib/api';
@@ -13,6 +14,7 @@ function App() {
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeCall, setActiveCall] = useState<Call | null>(null);
 
   useEffect(() => {
     loadData();
@@ -48,6 +50,28 @@ function App() {
       console.warn('API health check failed:', err);
     }
   };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActiveCall(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    if (!activeCall) return;
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [activeCall]);
+
+  const transcriptLines = useMemo(() => {
+    if (!activeCall?.transcript) return [];
+    return activeCall.transcript.split('\n').filter(Boolean);
+  }, [activeCall]);
 
   if (loading) {
     return (
@@ -175,7 +199,7 @@ function App() {
           ) : (
             <div className="space-y-3">
               {calls.map((call, index) => (
-                <CallCard key={call.id} call={call} index={index} />
+                <CallCard key={call.id} call={call} index={index} onView={setActiveCall} />
               ))}
             </div>
           )}
@@ -200,6 +224,85 @@ function App() {
           </button>
         </div>
       </div>
+
+      <AnimatePresence>
+        {activeCall && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-6"
+          >
+            <div
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              onClick={() => setActiveCall(null)}
+            />
+            <motion.div
+              initial={{ opacity: 0, y: 20, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 20, scale: 0.98 }}
+              transition={{ duration: 0.2 }}
+              className="relative w-full max-w-3xl overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-white/10 p-6 shadow-[0_40px_120px_rgba(0,0,0,0.6)]"
+            >
+              <div className="flex items-start justify-between gap-6">
+                <div>
+                  <div className="text-sm text-gray-400 font-semibold">Call Transcript</div>
+                  <div className="text-2xl font-bold text-white mt-1">
+                    {activeCall.caller_phone}
+                  </div>
+                  <div className="text-gray-400 text-sm mt-1">
+                    {activeCall.started_at
+                      ? new Date(activeCall.started_at).toLocaleString('en-AU', {
+                          weekday: 'long',
+                          hour: 'numeric',
+                          minute: 'numeric',
+                        })
+                      : 'Time unavailable'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setActiveCall(null)}
+                  className="px-4 py-2 glass glass-hover rounded-xl text-white/80 text-sm font-semibold transition-all"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-6 relative">
+                <div className="rounded-2xl border border-white/10 bg-black/30 p-5 max-h-[55vh] overflow-y-auto">
+                  {transcriptLines.length > 0 ? (
+                    <div className="space-y-3">
+                      {transcriptLines.map((line, idx) => (
+                        <div key={`${activeCall.id}-${idx}`} className="flex gap-3">
+                          <div className="text-xs font-bold uppercase tracking-widest text-cyan-300 min-w-[70px]">
+                            {line.startsWith('AI:') ? 'AI' : 'Customer'}
+                          </div>
+                          <div className="text-gray-200 text-sm leading-relaxed">
+                            {line.replace(/^AI:\s?/, '').replace(/^Customer:\s?/, '')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-gray-400 text-sm">
+                      Transcript not available for this call yet.
+                    </div>
+                  )}
+                </div>
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 rounded-b-2xl bg-gradient-to-t from-black/50 to-transparent" />
+                <div className="pointer-events-none absolute inset-x-0 bottom-2 text-center text-[11px] font-semibold uppercase tracking-[0.3em] text-white/40">
+                  Scroll
+                </div>
+              </div>
+
+              <div className="mt-5 flex items-center justify-between text-xs text-gray-400">
+                <div>Auto-saved transcript</div>
+                <div className="text-gray-500">Press Esc to close</div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
