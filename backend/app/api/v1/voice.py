@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.ai_service import ai_service
 from app.services.db_service import DBService
+from app.integrations.twilio_client import twilio_client
 from app.core.database import get_db
 import json
 import uuid
@@ -102,6 +103,7 @@ async def handle_incoming_call(
         "collected_data": {},
         "business_id": str(business.id),
         "business_name": business.name,
+        "business_phone": business.twilio_number,
         "caller_phone": caller_phone
     }
     
@@ -260,8 +262,20 @@ async def process_speech(
             "customer_phone": conversation["caller_phone"],
             "service": conversation["collected_data"].get("service", "General"),
             "booking_datetime": datetime.utcnow(),  # We'll improve date parsing later
-            "status": "pending"
+            "status": "confirmed",
+            "confirmed_at": datetime.utcnow()
         })
+
+        booking_date = booking.booking_datetime.strftime("%A %d %b %Y at %I:%M %p")
+        sms_message = (
+            f"Hi {booking.customer_name}! Your {booking.service} appointment at "
+            f"{conversation.get('business_name', 'our business')} is confirmed for "
+            f"{booking_date}. Questions? Call {conversation.get('business_phone', '')}"
+        )
+        try:
+            twilio_client.send_sms(booking.customer_phone, sms_message)
+        except Exception as e:
+            print(f"❌ ERROR sending SMS: {e}")
         
         print(f"""
         ═══════════════════════════════════════
@@ -338,6 +352,13 @@ def _is_booking_complete(collected_data: dict, history: list, intent: str, ai_re
         has_service = "service" in collected_data
         has_name = _extract_name(history) != "Customer"  # We got a real name
         
+        print(
+            f"🔎 Booking check: completion_signal={has_completion_signal}, "
+            f"service={has_service}, name={has_name}, "
+            f"ai_text='{ai_response_text}', "
+            f"collected_data={collected_data}"
+        )
+
         # If we have service, name, and time preference, it's ready
         if has_service and has_name:
             print(f"✅ Booking completion detected - AI confirmed with all data collected")
@@ -348,16 +369,29 @@ def _is_booking_complete(collected_data: dict, history: list, intent: str, ai_re
 
 def _extract_name(history: list) -> str:
     """Extract customer name from conversation history"""
-    # Simple extraction - look for "my name is X" or "I'm X"
+    # Simple extraction - look for common name patterns
     for msg in reversed(history):
         if msg["role"] == "user":
-            content = msg["content"].lower()
-            if "my name is" in content:
-                name = content.split("my name is")[-1].strip()
+            content = msg["content"].strip()
+            content_lower = content.lower()
+
+            if "my name is" in content_lower:
+                name = content_lower.split("my name is")[-1].strip()
                 return name.split()[0].capitalize() if name else "Customer"
-            elif "i'm" in content or "i am" in content:
-                words = content.replace("i'm", "").replace("i am", "").strip().split()
+            if "i'm" in content_lower or "i am" in content_lower:
+                cleaned = content_lower.replace("i'm", "").replace("i am", "").strip()
+                words = cleaned.split()
                 if words:
                     return words[0].capitalize()
+            if "this is" in content_lower:
+                name = content_lower.split("this is")[-1].strip()
+                return name.split()[0].capitalize() if name else "Customer"
+            if " and my" in content_lower:
+                name = content_lower.split(" and my")[0].strip()
+                return name.split()[0].capitalize() if name else "Customer"
+            # Fallback: if the user reply is just a name (1-2 words, no digits)
+            words = [w for w in content.split() if w.isalpha()]
+            if words and len(words) <= 2 and not any(ch.isdigit() for ch in content):
+                return words[0].capitalize()
     
     return "Customer"

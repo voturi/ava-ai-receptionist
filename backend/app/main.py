@@ -28,6 +28,7 @@ app.add_middleware(
 )
 #Include routers
 app.include_router(voice.router, prefix="/voice", tags=["voice"])
+app.include_router(calls.router, prefix="/api", tags=["calls"])
 
 
 @app.get("/")
