@@ -33,7 +33,8 @@ function App() {
       setError(null);
     } catch (err) {
       console.error('Failed to load data:', err);
-      setError('Failed to load data. Make sure the backend is running on http://localhost:8000');
+      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      setError(`Failed to load data. Make sure the backend is running on ${apiBase}`);
     } finally {
       setLoading(false);
     }
