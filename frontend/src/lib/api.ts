@@ -75,6 +75,12 @@ class APIClient {
       avg_duration: Math.round(avgDuration),
     };
   }
+
+  async getHealth(): Promise<{ status: string }> {
+    const response = await fetch(`${this.baseURL}/health`);
+    if (!response.ok) throw new Error("Failed to fetch health");
+    return response.json();
+  }
 }
 
 export const api = new APIClient();

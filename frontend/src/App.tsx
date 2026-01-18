@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Phone, Calendar, DollarSign, TrendingUp, Clock } from 'lucide-react';
+import { Phone, Calendar, TrendingUp, Clock } from 'lucide-react';
 import { StatCard } from './components/dashboard/StatCard';
 import CallCard from './components/dashboard/CallCard';
 import { api, type Call, type Stats } from './lib/api';
@@ -16,6 +16,7 @@ function App() {
 
   useEffect(() => {
     loadData();
+    checkHealth();
     const interval = setInterval(loadData, 10000);
     return () => clearInterval(interval);
   }, []);
@@ -35,6 +36,15 @@ function App() {
       setError('Failed to load data. Make sure the backend is running on http://localhost:8000');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const checkHealth = async () => {
+    try {
+      const health = await api.getHealth();
+      console.log('API health:', health.status);
+    } catch (err) {
+      console.warn('API health check failed:', err);
     }
   };
 
