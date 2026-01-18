@@ -101,13 +101,13 @@ function App() {
   return (
     <div className="min-h-screen bg-black p-6">
       {/* Background orbs */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 left-1/4 w-[500px] h-[500px] bg-cyan-500/8 rounded-full blur-3xl animate-pulse-slow" />
-        <div
-          className="absolute bottom-1/4 right-1/4 w-[500px] h-[500px] bg-purple-500/8 rounded-full blur-3xl animate-pulse-slow"
-          style={{ animationDelay: '2s' }}
-        />
-      </div>
+        <div className="fixed inset-0 overflow-hidden pointer-events-none">
+          <div className="absolute top-1/4 left-1/4 w-[520px] h-[520px] bg-cyan-300/10 rounded-full blur-3xl animate-orb-drift" />
+          <div
+            className="absolute bottom-1/4 right-1/4 w-[520px] h-[520px] bg-purple-300/10 rounded-full blur-3xl animate-orb-drift-slow"
+            style={{ animationDelay: '2s' }}
+          />
+        </div>
 
       <div className="max-w-7xl mx-auto relative z-10">
         {/* Header */}
@@ -130,7 +130,7 @@ function App() {
             <button className="px-4 py-2 glass glass-hover rounded-xl text-white/80 text-sm font-medium transition-all">
               Settings
             </button>
-            <button className="px-6 py-2 bg-gradient-to-r from-cyan-500 to-cyan-600 rounded-xl text-white font-semibold hover:shadow-[0_0_30px_rgba(0,217,255,0.4)] transition-all duration-300 transform hover:-translate-y-0.5">
+            <button className="px-6 py-2 bg-gradient-to-r from-cyan-400 to-cyan-600 rounded-xl text-white font-semibold hover:shadow-[0_0_30px_rgba(0,217,255,0.45)] animate-glow-breathe transition-all duration-300 transform hover:-translate-y-0.5">
               Test AI Call
             </button>
           </div>
@@ -159,7 +159,7 @@ function App() {
               icon={Clock}
               color="yellow"
             />
-            <div className="bg-gradient-to-br from-cyan-500/15 to-purple-500/15 backdrop-blur-xl border border-cyan-500/30 rounded-2xl p-6 hover:shadow-[0_12px_40px_rgba(0,217,255,0.2)] transition-all duration-300 cursor-pointer group">
+            <div className="bg-gradient-to-br from-cyan-500/15 to-purple-500/15 backdrop-blur-xl border border-cyan-500/30 rounded-2xl p-6 hover:shadow-[0_12px_40px_rgba(0,217,255,0.2)] transition-all duration-300 cursor-pointer group card-lift">
               <div className="flex items-center justify-between mb-4">
                 <div className="p-3 bg-white/10 rounded-xl group-hover:bg-white/20 transition-all">
                   <TrendingUp className="w-5 h-5 text-white" />
@@ -204,13 +204,13 @@ function App() {
             </div>
           )}
 
-          <button className="w-full mt-4 py-3 glass glass-hover rounded-xl text-gray-300 hover:text-white transition-all duration-200 text-sm font-bold">
+          <button className="w-full mt-4 py-3 glass glass-hover rounded-xl text-gray-300 hover:text-white transition-all duration-200 text-sm font-bold card-lift">
             View All Calls →
           </button>
         </div>
 
         {/* Bottom CTA */}
-        <div className="mt-6 bg-gradient-to-r from-cyan-500/10 to-purple-500/10 backdrop-blur-xl border border-cyan-500/20 rounded-2xl p-6 flex items-center justify-between">
+        <div className="mt-6 bg-gradient-to-r from-cyan-500/10 to-purple-500/10 backdrop-blur-xl border border-cyan-500/20 rounded-2xl p-6 flex items-center justify-between card-lift">
           <div>
             <h3 className="text-xl font-bold text-white mb-1">
               Your AI is performing excellently! 🎉
@@ -219,7 +219,7 @@ function App() {
               {stats && `${stats.booking_rate}% booking rate · ${stats.avg_duration}s avg response · 4.8/5 customer satisfaction`}
             </p>
           </div>
-          <button className="px-6 py-3 bg-gradient-to-r from-purple-500 to-purple-600 rounded-xl text-white font-bold hover:shadow-[0_0_30px_rgba(178,75,243,0.4)] transition-all duration-300 transform hover:-translate-y-0.5">
+          <button className="px-6 py-3 bg-gradient-to-r from-purple-500 to-purple-600 rounded-xl text-white font-bold hover:shadow-[0_0_30px_rgba(178,75,243,0.45)] transition-all duration-300 transform hover:-translate-y-0.5">
             View Analytics
           </button>
         </div>
@@ -242,12 +242,16 @@ function App() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 20, scale: 0.98 }}
               transition={{ duration: 0.2 }}
-              className="relative w-full max-w-3xl overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-white/10 p-6 shadow-[0_40px_120px_rgba(0,0,0,0.6)]"
+              className="relative w-full max-w-3xl overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-cyan-500/10 via-white/5 to-purple-500/10 p-6 shadow-[0_45px_140px_rgba(0,0,0,0.65)]"
             >
-              <div className="flex items-start justify-between gap-6">
+              <div className="pointer-events-none absolute inset-0 opacity-70">
+                <div className="absolute -top-24 right-0 h-56 w-56 rounded-full bg-cyan-300/15 blur-3xl" />
+                <div className="absolute -bottom-24 left-10 h-56 w-56 rounded-full bg-purple-300/15 blur-3xl" />
+              </div>
+              <div className="relative flex items-start justify-between gap-6">
                 <div>
-                  <div className="text-sm text-gray-400 font-semibold">Call Transcript</div>
-                  <div className="text-2xl font-bold text-white mt-1">
+                  <div className="text-sm text-gray-400 font-semibold uppercase tracking-[0.3em]">Call Transcript</div>
+                  <div className="text-2xl font-bold text-white mt-2">
                     {activeCall.caller_phone}
                   </div>
                   <div className="text-gray-400 text-sm mt-1">
@@ -266,6 +270,9 @@ function App() {
                 >
                   Close
                 </button>
+                <div className="pointer-events-none absolute left-0 right-24 top-8 h-px overflow-hidden">
+                  <div className="h-px w-[200%] bg-gradient-to-r from-transparent via-white/40 to-transparent animate-sheen-slide" />
+                </div>
               </div>
 
               <div className="mt-6 relative">
