@@ -1,13 +1,18 @@
 from fastapi import APIRouter, Request, Response, Depends
 from twilio.twiml.voice_response import VoiceResponse, Gather
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.ai_service import ai_service
 from app.services.db_service import DBService
 from app.integrations.twilio_client import twilio_client
+from app.integrations.providers import BookingContext, CustomerInfo, get_provider_config, resolve_provider
+from app.integrations.tts import AudioResult, get_voice_config as get_tts_config
+from app.integrations.tts import resolve_provider as resolve_tts_provider
 from app.core.database import get_db
 import json
 import uuid
+import re
+import asyncio
 
 router = APIRouter()
 
@@ -96,6 +101,9 @@ async def handle_incoming_call(
         )
         return Response(content=str(response), media_type="application/xml")
     
+    provider_config = get_provider_config(business.ai_config)
+    provider = resolve_provider(provider_config)
+
     # Initialize conversation in memory
     conversations[call_sid] = {
         "call_id": str(call.id),
@@ -103,8 +111,11 @@ async def handle_incoming_call(
         "collected_data": {},
         "business_id": str(business.id),
         "business_name": business.name,
+        "services": business.services or [],
         "business_phone": business.twilio_number,
-        "caller_phone": caller_phone
+        "caller_phone": caller_phone,
+        "provider": provider,
+        "provider_config": provider_config,
     }
     
     # Get AI greeting
@@ -133,11 +144,19 @@ async def handle_incoming_call(
     # Create TwiML response
     try:
         response = VoiceResponse()
-        response.say(
-            ai_response["text"],
-            voice='Polly.Nicole',
-            language='en-AU'
-        )
+        voice_config = get_tts_config(business.ai_config)
+        cached_greeting_url = (business.ai_config or {}).get("voice", {}).get("greeting_audio_url")
+        if cached_greeting_url:
+            response.play(cached_greeting_url)
+        else:
+            tts_provider = resolve_tts_provider(voice_config)
+            if not await _play_tts_response(response, ai_response["text"], business.ai_config or {}):
+                response.say(
+                    ai_response["text"],
+                    voice='Polly.Nicole',
+                    language='en-AU'
+                )
+        
         
         # Gather input
         gather = Gather(
@@ -194,6 +213,9 @@ async def process_speech(
         )
         return Response(content=str(response), media_type="application/xml")
     
+    db_service = DBService(db)
+    business = await db_service.get_business(conversation.get("business_id", ""))
+
     print(f"""
     🎤 CUSTOMER: "{speech_result}"
     """)
@@ -224,9 +246,9 @@ async def process_speech(
     
     # Update collected data
     conversation["collected_data"].update(ai_response["collected_data"])
+    conversation["last_ai_response"] = ai_response["text"]
     
     # Update call in database
-    db_service = DBService(db)
     if conversation.get("call_id"):
         # Build transcript
         transcript = "\n".join([
@@ -254,16 +276,80 @@ async def process_speech(
     )
     
     if is_booking_complete:
+        provider = conversation.get("provider")
+        requested_dt = _extract_datetime_from_history(conversation["history"])
+        context = BookingContext(
+            business_id=conversation["business_id"],
+            business_name=conversation["business_name"],
+            service=conversation["collected_data"].get("service", "General"),
+            requested_datetime=requested_dt,
+            customer=CustomerInfo(
+                name=_extract_name(conversation["history"]),
+                phone=conversation["caller_phone"],
+            ),
+            metadata=conversation.get("provider_config", {}),
+        )
+
+        availability = await provider.check_availability(context)
+        if not availability.available:
+            response.say(
+                availability.reason or "Thanks! That time isn't available. Could you pick another time?",
+                voice='Polly.Nicole',
+                language='en-AU'
+            )
+            gather = Gather(
+                input='speech',
+                action=f'/voice/process/{business_id}/{call_sid}',
+                timeout=5,
+                speech_timeout='auto',
+                language='en-AU'
+            )
+            response.append(gather)
+            response.say(
+                "Are you still there? Call back anytime!",
+                voice='Polly.Nicole',
+                language='en-AU'
+            )
+            return Response(content=str(response), media_type="application/xml")
+
+        intent = await provider.create_booking(context)
+        if intent.status == "declined":
+            response.say(
+                intent.message_override or "Thanks! Could you share another time that works for you?",
+                voice='Polly.Nicole',
+                language='en-AU'
+            )
+            gather = Gather(
+                input='speech',
+                action=f'/voice/process/{business_id}/{call_sid}',
+                timeout=5,
+                speech_timeout='auto',
+                language='en-AU'
+            )
+            response.append(gather)
+            response.say(
+                "Are you still there? Call back anytime!",
+                voice='Polly.Nicole',
+                language='en-AU'
+            )
+            return Response(content=str(response), media_type="application/xml")
+
+        booking_datetime = requested_dt or datetime.utcnow()
+        internal_notes = None
+        if intent.external_reference:
+            internal_notes = f"Provider reference: {intent.external_reference}"
+
         # Create booking in database!
         booking = await db_service.create_booking({
             "business_id": uuid.UUID(conversation["business_id"]),
             "call_id": uuid.UUID(conversation["call_id"]),
-            "customer_name": _extract_name(conversation["history"]),
-            "customer_phone": conversation["caller_phone"],
-            "service": conversation["collected_data"].get("service", "General"),
-            "booking_datetime": datetime.utcnow(),  # We'll improve date parsing later
-            "status": "confirmed",
-            "confirmed_at": datetime.utcnow()
+            "customer_name": context.customer.name,
+            "customer_phone": context.customer.phone,
+            "service": context.service,
+            "booking_datetime": booking_datetime,
+            "status": intent.status,
+            "confirmed_at": datetime.utcnow() if intent.status == "confirmed" else None,
+            "internal_notes": internal_notes
         })
 
         booking_date = booking.booking_datetime.strftime("%A %d %b %Y at %I:%M %p")
@@ -272,6 +358,8 @@ async def process_speech(
             f"{conversation.get('business_name', 'our business')} is confirmed for "
             f"{booking_date}. Questions? Call {conversation.get('business_phone', '')}"
         )
+        if intent.message_override:
+            sms_message = intent.message_override
         try:
             twilio_client.send_sms(booking.customer_phone, sms_message)
         except Exception as e:
@@ -296,18 +384,46 @@ async def process_speech(
             }
         )
         
-        response.say(
-            "Perfect! Your appointment is confirmed. You'll receive an SMS shortly. Thank you!",
-            voice='Polly.Nicole',
-            language='en-AU'
+        if intent.status == "confirmed":
+            message_text = "Perfect! Your appointment is confirmed. You'll receive an SMS shortly. Thank you!"
+        else:
+            message_text = "Great! I'm sending you a link to confirm your booking. Please check your SMS."
+
+        conversation["last_ai_response"] = message_text
+        conversation["post_response_action"] = "end"
+
+        tts_status = await _enqueue_tts_response(
+            response,
+            message_text,
+            business.ai_config if business else {},
+            business_id,
+            call_sid,
+            timeout_seconds=4.0,
         )
+        if tts_status == "redirected":
+            return Response(content=str(response), media_type="application/xml")
+        if tts_status == "none":
+            response.say(message_text, voice='Polly.Nicole', language='en-AU')
         
         # Clean up
+        await provider.after_booking(context, str(booking.id))
         del conversations[call_sid]
         
     else:
         # Continue conversation
-        response.say(ai_response["text"], voice='Polly.Nicole', language='en-AU')
+        conversation["post_response_action"] = "gather"
+        tts_status = await _enqueue_tts_response(
+            response,
+            ai_response["text"],
+            business.ai_config if business else {},
+            business_id,
+            call_sid,
+            timeout_seconds=4.0,
+        )
+        if tts_status == "redirected":
+            return Response(content=str(response), media_type="application/xml")
+        if tts_status == "none":
+            response.say(ai_response["text"], voice='Polly.Nicole', language='en-AU')
         
         gather = Gather(
             input='speech',
@@ -324,6 +440,56 @@ async def process_speech(
             language='en-AU'
         )
     
+    return Response(content=str(response), media_type="application/xml")
+
+
+@router.post("/response/{business_id}/{call_sid}")
+async def tts_response(
+    business_id: str,
+    call_sid: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the TTS response after playing a cached thinking clip."""
+    conversation = conversations.get(call_sid, {})
+    if not conversation:
+        response = VoiceResponse()
+        response.say(
+            "Sorry, I lost track of our conversation. Please call back!",
+            voice='Polly.Nicole',
+            language='en-AU'
+        )
+        return Response(content=str(response), media_type="application/xml")
+
+    db_service = DBService(db)
+    business = await db_service.get_business(conversation.get("business_id", ""))
+    response_text = conversation.get("last_ai_response", "")
+    response = VoiceResponse()
+
+    voice_config = get_tts_config(business.ai_config if business else {})
+    tts_provider = resolve_tts_provider(voice_config)
+    tts_audio = await _synthesize_with_timeout(tts_provider, response_text, voice_config, 8.0)
+    if tts_audio.audio_url:
+        response.play(tts_audio.audio_url)
+    else:
+        response.say(response_text, voice='Polly.Nicole', language='en-AU')
+
+    if conversation.get("post_response_action") == "gather":
+        gather = Gather(
+            input='speech',
+            action=f'/voice/process/{business_id}/{call_sid}',
+            timeout=5,
+            speech_timeout='auto',
+            language='en-AU'
+        )
+        response.append(gather)
+        response.say(
+            "Are you still there? Call back anytime!",
+            voice='Polly.Nicole',
+            language='en-AU'
+        )
+    else:
+        del conversations[call_sid]
+
     return Response(content=str(response), media_type="application/xml")
 
 
@@ -395,3 +561,103 @@ def _extract_name(history: list) -> str:
                 return words[0].capitalize()
     
     return "Customer"
+
+
+def _extract_datetime_from_history(history: list) -> datetime | None:
+    weekdays = {
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+        "saturday": 5,
+        "sunday": 6,
+    }
+
+    time_pattern = re.compile(r"(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?", re.IGNORECASE)
+
+    for msg in reversed(history):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        content_lower = content.lower()
+
+        day = None
+        for name, idx in weekdays.items():
+            if name in content_lower:
+                day = idx
+                break
+
+        time_match = time_pattern.search(content_lower)
+        if day is None and not time_match:
+            continue
+
+        now = datetime.utcnow()
+        target_date = now
+        if day is not None:
+            days_ahead = (day - now.weekday() + 7) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            if "next week" in content_lower:
+                days_ahead += 7
+            target_date = now + timedelta(days=days_ahead)
+
+        hour = 9
+        minute = 0
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2) or 0)
+            meridiem = (time_match.group(3) or "").lower()
+            if meridiem == "pm" and hour < 12:
+                hour += 12
+            if meridiem == "am" and hour == 12:
+                hour = 0
+        elif "afternoon" in content_lower or "arvo" in content_lower:
+            hour = 15
+        elif "morning" in content_lower:
+            hour = 10
+
+        return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    return None
+
+
+async def _enqueue_tts_response(
+    response: VoiceResponse,
+    text: str,
+    ai_config: dict,
+    business_id: str,
+    call_sid: str,
+    timeout_seconds: float,
+) -> str:
+    """Play TTS audio or enqueue a follow-up response with a cached thinking clip."""
+    voice_config = get_tts_config(ai_config or {})
+    tts_provider = resolve_tts_provider(voice_config)
+    tts_audio = await _synthesize_with_timeout(tts_provider, text, voice_config, timeout_seconds)
+    if tts_audio.audio_url:
+        response.play(tts_audio.audio_url)
+        return "played"
+
+    thinking_url = (ai_config or {}).get("voice", {}).get("thinking_audio_url")
+    if thinking_url:
+        response.play(thinking_url)
+        response.redirect(f"/voice/response/{business_id}/{call_sid}")
+        return "redirected"
+    return "none"
+
+
+async def _synthesize_with_timeout(provider, text: str, voice_config, timeout_seconds: float):
+    """Run TTS synthesis with a timeout and return a safe AudioResult on failure."""
+    try:
+        return await asyncio.wait_for(
+            provider.synthesize(text, voice_config),
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        return AudioResult(
+            audio_url=None,
+            content_type=None,
+            duration_ms=None,
+            cached=False,
+            error="tts_timeout_or_error",
+        )

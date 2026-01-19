@@ -20,7 +20,13 @@ class Business(Base):
     ai_config = Column(JSON, default={
         "greeting": "Thanks for calling! How can I help you today?",
         "voice_id": "Polly.Nicole",
-        "language": "en-AU"
+        "language": "en-AU",
+        "voice": {
+            "provider": "deepgram",
+            "model": "aura-2-thalia-en",
+            "voice_id": "aura-2-thalia-en",
+            "language": "en-AU"
+        }
     })
     
     # Business Configuration

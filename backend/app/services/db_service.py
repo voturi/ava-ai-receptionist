@@ -4,6 +4,7 @@ from app.models import Business, Call, Booking
 from typing import Optional, List
 from datetime import datetime
 import uuid
+from sqlalchemy.orm.attributes import flag_modified
 
 class DBService:
     """
@@ -40,6 +41,18 @@ class DBService:
         self.session.add(business)
         await self.session.commit()
         await self.session.refresh(business)
+        return business
+
+    async def update_business(self, business_id: str, data: dict) -> Optional[Business]:
+        """Update business fields by ID."""
+        business = await self.get_business(business_id)
+        if business:
+            for key, value in data.items():
+                setattr(business, key, value)
+                if key == "ai_config":
+                    flag_modified(business, "ai_config")
+            await self.session.commit()
+            await self.session.refresh(business)
         return business
     
     # ==================== CALLS ====================

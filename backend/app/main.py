@@ -7,6 +7,7 @@ import os
 #Import Routers
 from app.api.v1 import voice
 from app.api.v1 import calls
+from app.api.v1 import tts_admin
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +30,7 @@ app.add_middleware(
 #Include routers
 app.include_router(voice.router, prefix="/voice", tags=["voice"])
 app.include_router(calls.router, prefix="/api", tags=["calls"])
+app.include_router(tts_admin.router, prefix="/admin/tts", tags=["tts"])
 
 
 @app.get("/")
