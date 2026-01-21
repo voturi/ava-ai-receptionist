@@ -286,8 +286,8 @@ class CallSession:
                     sample_rate=8000,
                     encoding="mulaw",
                     interim_results=True,
-                    utterance_end_ms=1200,  # Wait 1.2s of silence before UtteranceEnd
-                    endpointing=800,  # 800ms silence for final transcript chunks
+                    utterance_end_ms=2000,  # Wait 2s of silence before UtteranceEnd (allows thinking pauses)
+                    endpointing=1000,  # 1s silence for final transcript chunks
                 ),
             )
             await self.stt_connection.connect()
