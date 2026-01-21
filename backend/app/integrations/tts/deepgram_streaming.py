@@ -25,6 +25,7 @@ from typing import Awaitable, Callable, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 DEEPGRAM_TTS_WS_URL = "wss://api.deepgram.com/v1/speak"
 
@@ -116,7 +117,7 @@ class DeepgramStreamingTTS:
     @property
     def is_connected(self) -> bool:
         """Check if WebSocket is connected."""
-        return self._connected and self._ws is not None and not self._ws.closed
+        return self._connected and self._ws is not None and self._ws.state == State.OPEN
 
     @property
     def time_to_first_audio_ms(self) -> Optional[float]:
@@ -234,7 +235,7 @@ class DeepgramStreamingTTS:
                 pass
 
         # Close WebSocket
-        if self._ws and not self._ws.closed:
+        if self._ws and self._ws.state == State.OPEN:
             try:
                 await self._ws.send(json.dumps({"type": "Close"}))
                 await self._ws.close()

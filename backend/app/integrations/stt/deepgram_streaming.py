@@ -23,6 +23,7 @@ from typing import Awaitable, Callable, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 DEEPGRAM_STT_WS_URL = "wss://api.deepgram.com/v1/listen"
 
@@ -109,7 +110,7 @@ class DeepgramStreamingSTT:
     @property
     def is_connected(self) -> bool:
         """Check if WebSocket is connected."""
-        return self._connected and self._ws is not None and not self._ws.closed
+        return self._connected and self._ws is not None and self._ws.state == State.OPEN
 
     async def connect(self) -> None:
         """Establish WebSocket connection to Deepgram."""
@@ -196,7 +197,7 @@ class DeepgramStreamingSTT:
                 pass
 
         # Close WebSocket
-        if self._ws and not self._ws.closed:
+        if self._ws and self._ws.state == State.OPEN:
             try:
                 # Send close message to finalize transcription
                 await self._ws.send(json.dumps({"type": "CloseStream"}))
