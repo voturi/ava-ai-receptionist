@@ -29,6 +29,11 @@ from websockets.protocol import State
 
 DEEPGRAM_TTS_WS_URL = "wss://api.deepgram.com/v1/speak"
 
+# Detect websockets version for header parameter compatibility
+import inspect
+_ws_connect_params = inspect.signature(websockets.connect).parameters
+WS_HEADERS_PARAM = "additional_headers" if "additional_headers" in _ws_connect_params else "extra_headers"
+
 
 @dataclass
 class TTSConfig:
@@ -117,7 +122,12 @@ class DeepgramStreamingTTS:
     @property
     def is_connected(self) -> bool:
         """Check if WebSocket is connected."""
-        return self._connected and self._ws is not None and self._ws.state == State.OPEN
+        if not self._connected or self._ws is None:
+            return False
+        try:
+            return self._ws.state == State.OPEN
+        except Exception:
+            return False
 
     @property
     def time_to_first_audio_ms(self) -> Optional[float]:
@@ -141,12 +151,13 @@ class DeepgramStreamingTTS:
         url = f"{DEEPGRAM_TTS_WS_URL}?{'&'.join(params)}"
 
         try:
-            self._ws = await websockets.connect(
-                url,
-                additional_headers={"Authorization": f"Token {self.api_key}"},
-                ping_interval=20,
-                ping_timeout=10,
-            )
+            # Use version-appropriate header parameter
+            connect_kwargs = {
+                WS_HEADERS_PARAM: {"Authorization": f"Token {self.api_key}"},
+                "ping_interval": 20,
+                "ping_timeout": 10,
+            }
+            self._ws = await websockets.connect(url, **connect_kwargs)
             self._connected = True
             self._connected_at = datetime.utcnow()
 
