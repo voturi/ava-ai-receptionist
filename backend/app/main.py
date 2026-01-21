@@ -8,6 +8,7 @@ import os
 from app.api.v1 import voice
 from app.api.v1 import calls
 from app.api.v1 import tts_admin
+from app.api.v1 import media_stream
 
 # Load environment variables
 load_dotenv()
@@ -31,6 +32,7 @@ app.add_middleware(
 app.include_router(voice.router, prefix="/voice", tags=["voice"])
 app.include_router(calls.router, prefix="/api", tags=["calls"])
 app.include_router(tts_admin.router, prefix="/admin/tts", tags=["tts"])
+app.include_router(media_stream.router, prefix="/stream", tags=["streaming"])
 
 
 @app.get("/")

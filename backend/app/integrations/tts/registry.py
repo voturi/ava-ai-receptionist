@@ -6,10 +6,20 @@ from app.integrations.tts.base import VoiceConfig
 from app.integrations.tts.providers.native import NativeTTSProvider
 from app.integrations.tts.providers.deepgram import DeepgramTTSProvider
 
-_PROVIDERS = {
-    "native": NativeTTSProvider(),
-    "deepgram": DeepgramTTSProvider(),
-}
+# Lazy-loaded provider instances (avoids Supabase client creation at import time)
+_provider_instances: dict[str, Any] = {}
+
+
+def _get_provider_instance(name: str):
+    """Get or create a provider instance lazily."""
+    if name not in _provider_instances:
+        if name == "native":
+            _provider_instances[name] = NativeTTSProvider()
+        elif name == "deepgram":
+            _provider_instances[name] = DeepgramTTSProvider()
+        else:
+            _provider_instances[name] = NativeTTSProvider()
+    return _provider_instances[name]
 
 
 def get_voice_config(ai_config: dict[str, Any] | None) -> VoiceConfig:
@@ -29,4 +39,4 @@ def get_voice_config(ai_config: dict[str, Any] | None) -> VoiceConfig:
 
 def resolve_provider(voice: VoiceConfig):
     """Resolve a provider instance by voice configuration."""
-    return _PROVIDERS.get(voice.provider, _PROVIDERS["native"])
+    return _get_provider_instance(voice.provider)
