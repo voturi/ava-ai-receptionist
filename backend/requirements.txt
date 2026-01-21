@@ -23,7 +23,7 @@ openai==1.10.0
 twilio==8.11.0
 
 # WebSockets (for Twilio Media Streams)
-websockets>=12.0
+websockets>=13.0
 
 # External Services - we'll add these later when needed
 # deepgram-sdk==3.0.0

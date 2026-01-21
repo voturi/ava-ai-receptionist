@@ -113,7 +113,7 @@ function App() {
         {/* Header */}
         <div className="mb-8 flex items-center justify-between">
           <div>
-            <h1 className="text-4xl font-bold text-white mb-2">
+            <h1 className="text-4xl font-display font-semibold tracking-[-0.02em] text-white mb-2">
               Bondi Hair Salon
             </h1>
             <p className="text-gray-400 text-sm font-medium">
@@ -168,7 +168,7 @@ function App() {
                   Excellent
                 </div>
               </div>
-              <div className="text-5xl font-bold text-white mb-1">
+              <div className="text-5xl font-display font-semibold tracking-[-0.02em] text-white mb-1">
                 {stats.booking_rate}%
               </div>
               <div className="text-gray-200 text-sm font-semibold">Booking Success Rate</div>
@@ -179,7 +179,7 @@ function App() {
         {/* Recent Calls */}
         <div className="glass rounded-2xl p-6">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-bold text-white">Recent Calls</h2>
+            <h2 className="text-2xl font-display font-semibold tracking-tight text-white">Recent Calls</h2>
             <div className="flex items-center gap-2 text-sm text-gray-400 font-medium">
               <Clock className="w-4 h-4" />
               Auto-refreshing every 10s
@@ -189,7 +189,7 @@ function App() {
           {calls.length === 0 ? (
             <div className="text-center py-12">
               <Phone className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-              <h3 className="text-xl font-semibold text-gray-400 mb-2">
+              <h3 className="text-xl font-display font-semibold tracking-tight text-gray-400 mb-2">
                 No calls yet
               </h3>
               <p className="text-gray-500">
@@ -212,7 +212,7 @@ function App() {
         {/* Bottom CTA */}
         <div className="mt-6 bg-gradient-to-r from-cyan-500/10 to-purple-500/10 backdrop-blur-xl border border-cyan-500/20 rounded-2xl p-6 flex items-center justify-between card-lift">
           <div>
-            <h3 className="text-xl font-bold text-white mb-1">
+            <h3 className="text-xl font-display font-semibold tracking-tight text-white mb-1">
               Your AI is performing excellently! 🎉
             </h3>
             <p className="text-gray-300 text-sm font-medium">
@@ -251,7 +251,7 @@ function App() {
               <div className="relative flex items-start justify-between gap-6">
                 <div>
                   <div className="text-sm text-gray-400 font-semibold uppercase tracking-[0.3em]">Call Transcript</div>
-                  <div className="text-2xl font-bold text-white mt-2">
+                  <div className="text-2xl font-display font-semibold tracking-tight text-white mt-2">
                     {activeCall.caller_phone}
                   </div>
                   <div className="text-gray-400 text-sm mt-1">

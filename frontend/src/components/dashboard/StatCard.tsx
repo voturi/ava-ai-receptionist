@@ -68,7 +68,7 @@ export const StatCard = ({
           </div>
         )}
       </div>
-      <div className="text-5xl font-bold text-white mb-1">
+      <div className="text-5xl font-display font-semibold tracking-[-0.02em] text-white mb-1">
         {displayValue}
       </div>
       <div className="text-gray-300 text-sm font-semibold">{title}</div>
@@ -76,4 +76,3 @@ export const StatCard = ({
   );
 };
  
-

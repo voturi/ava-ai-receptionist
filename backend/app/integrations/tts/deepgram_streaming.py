@@ -142,7 +142,7 @@ class DeepgramStreamingTTS:
         try:
             self._ws = await websockets.connect(
                 url,
-                extra_headers={"Authorization": f"Token {self.api_key}"},
+                additional_headers={"Authorization": f"Token {self.api_key}"},
                 ping_interval=20,
                 ping_timeout=10,
             )

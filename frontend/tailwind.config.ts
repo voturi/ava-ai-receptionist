@@ -10,7 +10,8 @@ const config: Config = {
         "bg-tertiary": "#141414",
       },
       fontFamily: {
-        sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+        sans: ["Manrope", "ui-sans-serif", "system-ui", "sans-serif"],
+        display: ["Space Grotesk", "ui-sans-serif", "system-ui", "sans-serif"],
       },
       backdropBlur: {
         xs: "2px",
