@@ -10,6 +10,24 @@ from app.integrations.tts.base import AudioResult, VoiceConfig
 from app.integrations.tts.metrics import TTSMetrics, now_iso
 from app.integrations.tts.storage import AudioStorage, get_storage_config
 
+# Module-level shared HTTP client with connection pooling
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Get or create a shared HTTP client with connection pooling.
+
+    Connection pooling reduces latency by reusing TCP connections
+    instead of establishing new ones for each request.
+    """
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _http_client
+
 
 class DeepgramTTSProvider:
     """Deepgram TTS provider that uploads audio to Supabase Storage."""
@@ -62,16 +80,17 @@ class DeepgramTTSProvider:
             "encoding": "mp3",
         }
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(
-                "https://api.deepgram.com/v1/speak",
-                params=params,
-                headers={
-                    "Authorization": f"Token {self.api_key}",
-                    "Content-Type": "text/plain",
-                },
-                content=payload,
-            )
+        # Use shared client with connection pooling for better performance
+        client = _get_http_client()
+        response = await client.post(
+            "https://api.deepgram.com/v1/speak",
+            params=params,
+            headers={
+                "Authorization": f"Token {self.api_key}",
+                "Content-Type": "text/plain",
+            },
+            content=payload,
+        )
         if response.status_code >= 400:
             error_detail = response.text.strip()
             metrics = TTSMetrics(

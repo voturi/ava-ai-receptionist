@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.services.db_service import DBService
-from app.integrations.tts.greeting import generate_greeting_audio
+from app.integrations.tts.greeting import generate_greeting_audio, generate_filler_audio, generate_all_fillers, FILLER_TEXTS
 from app.integrations.tts.registry import get_voice_config
 
 router = APIRouter()
@@ -33,7 +33,11 @@ async def generate_greeting(business_id: str, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=404, detail="Business not found")
 
     ai_config = business.ai_config or {}
-    greeting_text = ai_config.get("greeting", "Hello! How can I help you today?")
+    # Use greeting from config, or generate one with business name
+    greeting_text = ai_config.get("greeting")
+    if not greeting_text or greeting_text == "Thanks for calling! How can I help you today?":
+        # Generate personalized greeting with business name
+        greeting_text = f"G'day! Welcome to {business.name}. How can I help you today?"
     voice_config = get_voice_config(ai_config)
 
     result = await generate_greeting_audio(business_id, greeting_text, voice_config)
@@ -45,9 +49,10 @@ async def generate_greeting(business_id: str, db: AsyncSession = Depends(get_db)
 
     ai_config.setdefault("voice", {})
     ai_config["voice"]["greeting_audio_url"] = result.audio_url
+    ai_config["greeting"] = greeting_text  # Store the actual greeting text used
     await db_service.update_business(business_id, {"ai_config": ai_config})
 
-    return {"status": "ok", "audio_url": result.audio_url}
+    return {"status": "ok", "audio_url": result.audio_url, "greeting_text": greeting_text}
 
 
 @router.post("/thinking/{business_id}")
@@ -74,6 +79,49 @@ async def generate_thinking_clip(business_id: str, db: AsyncSession = Depends(ge
     await db_service.update_business(business_id, {"ai_config": ai_config})
 
     return {"status": "ok", "audio_url": result.audio_url}
+
+
+@router.post("/filler/{business_id}")
+async def generate_filler_clips(business_id: str, db: AsyncSession = Depends(get_db)):
+    """Generate and store all context-aware filler audio clips for a business.
+
+    Generates multiple fillers:
+    - checking: "Let me check that for you." (for questions)
+    - noting: "Got it, just noting that down." (when user provides info)
+    - processing: "Give me a moment to process that." (general)
+    - thinking: "Let me think about that." (for complex questions)
+    """
+    db_service = DBService(db)
+    business = await db_service.get_business(business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    ai_config = business.ai_config or {}
+    voice_config = get_voice_config(ai_config)
+
+    # Generate all filler types
+    results = await generate_all_fillers(business_id, voice_config)
+
+    ai_config.setdefault("voice", {})
+    ai_config.setdefault("fillers", {})
+
+    urls = {}
+    for filler_type, result in results.items():
+        if result.audio_url:
+            ai_config["fillers"][filler_type] = result.audio_url
+            urls[filler_type] = result.audio_url
+
+    # Keep backwards compat - set default filler_audio_url to "checking"
+    if "checking" in urls:
+        ai_config["voice"]["filler_audio_url"] = urls["checking"]
+
+    await db_service.update_business(business_id, {"ai_config": ai_config})
+
+    return {
+        "status": "ok",
+        "fillers": urls,
+        "filler_texts": FILLER_TEXTS,
+    }
 
 
 @router.put("/voice/{business_id}")
