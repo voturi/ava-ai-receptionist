@@ -86,6 +86,7 @@ async def incoming_call_stream(
         return Response(content=str(response), media_type="application/xml")
 
     # Create call record in database
+    call = None
     try:
         call = await db_service.create_call({
             "business_id": business.id,
@@ -131,10 +132,13 @@ async def incoming_call_stream(
     stream = Stream(url=ws_url)
 
     # Pass custom parameters to the WebSocket handler
+    call_id_str = str(call.id) if call else ""
     stream.parameter(name="business_id", value=str(business.id))
     stream.parameter(name="business_name", value=business.name)
     stream.parameter(name="caller_phone", value=caller_phone or "")
-    stream.parameter(name="call_id", value=str(call.id) if call else "")
+    stream.parameter(name="call_id", value=call_id_str)
+
+    print(f"📋 Stream params: call_id={call_id_str}")
 
     connect.append(stream)
     response.append(connect)
@@ -190,6 +194,9 @@ async def media_stream_websocket(
                     # Update session with business context
                     session.business_name = custom_params.get("business_name", "our business")
                     session.caller_phone = custom_params.get("caller_phone")
+                    session.call_id = custom_params.get("call_id")
+
+                    print(f"📋 Session initialized: call_id={session.call_id}, business={session.business_name}")
 
                     # Register session after we have full context
                     register_session(session)

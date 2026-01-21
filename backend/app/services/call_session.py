@@ -23,6 +23,8 @@ from app.integrations.stt.deepgram_streaming import TranscriptResult, STTConfig
 from app.integrations.tts import DeepgramStreamingTTS, TTSConfig
 from app.services.streaming_ai_service import streaming_ai_service
 from app.integrations.twilio_client import twilio_client
+from app.core.database import AsyncSessionLocal
+from app.services.db_service import DBService
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -84,6 +86,9 @@ class CallSession:
     call_sid: str
     business_id: str
     websocket: WebSocket
+
+    # Database reference
+    call_id: Optional[str] = None
 
     # Business context
     business_name: str = "our business"
@@ -429,6 +434,9 @@ class CallSession:
             total_latency = (datetime.utcnow() - llm_start).total_seconds() * 1000
             print(f"🤖 AI Response ({total_latency:.0f}ms): {full_response}")
 
+            # Update call record with transcript
+            await self._update_call_record()
+
             # Check if we should end the call
             if self._should_end_call(user_text, full_response):
                 # Wait for TTS to finish playing before ending
@@ -477,11 +485,56 @@ class CallSession:
     async def _end_call(self) -> None:
         """End the call gracefully using Twilio API."""
         try:
+            # Update call record with final data
+            await self._update_call_record(outcome="completed", ended=True)
+
             print(f"📞 Ending call: {self.call_sid}")
             twilio_client.client.calls(self.call_sid).update(status="completed")
             print(f"✅ Call ended successfully")
         except Exception as e:
             print(f"❌ Error ending call: {e}")
+
+    async def _update_call_record(
+        self,
+        outcome: Optional[str] = None,
+        intent: Optional[str] = None,
+        ended: bool = False,
+    ) -> None:
+        """
+        Update the call record in the database.
+
+        Called periodically to save transcript and at end to save outcome.
+        """
+        if not self.call_id:
+            print("⚠️ No call_id, skipping database update")
+            return
+
+        try:
+            # Build transcript from conversation history
+            transcript = "\n".join([
+                f"{'Customer' if msg['role'] == 'user' else 'AI'}: {msg['content']}"
+                for msg in self.conversation_history
+            ])
+
+            # Build update data
+            update_data = {"transcript": transcript}
+
+            if outcome:
+                update_data["outcome"] = outcome
+            if intent:
+                update_data["intent"] = intent
+            if ended:
+                update_data["ended_at"] = datetime.utcnow()
+
+            # Update in database using a new session
+            async with AsyncSessionLocal() as session:
+                db_service = DBService(session)
+                await db_service.update_call(self.call_id, update_data)
+
+            print(f"💾 Call record updated: {self.call_id}")
+
+        except Exception as e:
+            print(f"❌ Error updating call record: {e}")
 
     async def _on_transcript(self, result: TranscriptResult) -> None:
         """Handle transcript from STT."""
