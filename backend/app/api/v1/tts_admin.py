@@ -51,7 +51,7 @@ async def generate_greeting(business_id: str, db: AsyncSession = Depends(get_db)
     ai_config = business.ai_config or {}
     # Use greeting from config, or generate one with business name
     greeting_text = ai_config.get("greeting")
-    if not greeting_text or greeting_text == "Thanks for calling! How can I help you today?":
+    if not greeting_text or greeting_text == "Thanks for calling Marks Plumbing Servoces, I am Echo! How can I help you today?":
         # Generate personalized greeting with business name
         greeting_text = f"G'day! Welcome to {business.name}. How can I help you today?"
     voice_config = get_voice_config(ai_config)
