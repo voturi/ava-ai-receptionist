@@ -111,6 +111,8 @@ class CallSession:
     # Speaking state
     is_user_speaking: bool = False
     is_ai_speaking: bool = False
+    pending_end_call: bool = False
+    pending_end_mark: str = "end_call"
 
     # Metrics
     metrics: CallMetrics = field(default_factory=lambda: CallMetrics(call_sid=""))
@@ -121,6 +123,7 @@ class CallSession:
 
     # Background tasks
     _tasks: list = field(default_factory=list)
+    _end_call_task: Optional[asyncio.Task] = None
 
     # Tooling
     tool_router: ToolRouter = field(default_factory=ToolRouter)
@@ -200,6 +203,12 @@ class CallSession:
             # Mark event - audio playback reached a marker
             mark_name = message.get("mark", {}).get("name")
             print(f"📍 Mark reached: {mark_name}")
+            if self.pending_end_call and mark_name == self.pending_end_mark:
+                print("📞 End-of-call mark reached, ending call")
+                self.pending_end_call = False
+                if self._end_call_task and not self._end_call_task.done():
+                    self._end_call_task.cancel()
+                await self._end_call()
 
     async def send_audio(self, audio_bytes: bytes) -> None:
         """
@@ -343,6 +352,8 @@ class CallSession:
         self.is_ai_speaking = False
         self.metrics.total_ai_responses += 1
         print("🔊 TTS utterance complete")
+        if self.pending_end_call:
+            await self.send_mark(self.pending_end_mark)
 
     async def speak(self, text: str) -> None:
         """
@@ -414,6 +425,8 @@ class CallSession:
         full_response = ""
 
         try:
+            prefetched_tools = await self._prefetch_tools(user_text)
+
             # Stream LLM response with tools (mid-stream tool calling)
             buffer = ""
             async for event in streaming_ai_service.stream_with_tools(
@@ -423,6 +436,7 @@ class CallSession:
                 tools=TOOLS,
                 tool_executor=self._execute_tool,
                 max_tool_calls=2,
+                prefetched_tools=prefetched_tools,
             ):
                 if event.get("type") == "tool_call":
                     self.tool_history.append(event)
@@ -466,9 +480,11 @@ class CallSession:
 
             # Check if we should end the call
             if self._should_end_call(user_text, full_response):
-                # Wait for TTS to finish playing before ending
-                await asyncio.sleep(3)  # Give time for goodbye to play
-                await self._end_call()
+                # End call after Twilio playback reaches mark
+                self.pending_end_call = True
+                if self._end_call_task and not self._end_call_task.done():
+                    self._end_call_task.cancel()
+                self._end_call_task = asyncio.create_task(self._end_call_timeout())
 
         except Exception as e:
             print(f"❌ LLM processing error: {e}")
@@ -563,6 +579,17 @@ class CallSession:
         except Exception as e:
             print(f"❌ Error updating call record: {e}")
 
+    async def _end_call_timeout(self, timeout_seconds: int = 2) -> None:
+        """Fail-safe: end the call if the mark never arrives."""
+        try:
+            await asyncio.sleep(timeout_seconds)
+            if self.pending_end_call:
+                print("⏱️ End-of-call mark timeout, ending call")
+                self.pending_end_call = False
+                await self._end_call()
+        except asyncio.CancelledError:
+            pass
+
     async def _load_business_context(self) -> None:
         """Load business context from the database."""
         try:
@@ -590,14 +617,74 @@ class CallSession:
 
     async def _execute_tool(self, tool_name: str, arguments: dict) -> dict:
         """Execute a tool call with tenant context."""
+        print(f"🛠️ Tool call: {tool_name} args={arguments} business_id={self.business_id}")
         result = await self.tool_router.execute(
             tool_name,
             arguments,
             business_id=self.business_id,
             caller_phone=self.caller_phone,
         )
+        print(f"🧾 Tool result: {tool_name} => {result}")
         self.tool_context[tool_name] = result
         return result
+
+    async def _prefetch_tools(self, user_text: str) -> list[dict]:
+        """Deterministically prefetch tools for common intents (MVP heuristic)."""
+        text = user_text.lower()
+
+        topic_map = {
+            "cancellation": "cancellation",
+            "cancel": "cancellation",
+            "reschedule": "reschedule",
+            "late": "late_arrival",
+            "deposit": "deposits",
+            "refund": "refunds",
+            "price": "pricing",
+            "pricing": "pricing",
+            "hours": "hours",
+            "open": "hours",
+            "close": "hours",
+            "location": "location",
+            "parking": "parking",
+        }
+
+        emergency_terms = [
+            "emergency",
+            "burst pipe",
+            "flood",
+            "sewage",
+            "gas smell",
+            "no water",
+        ]
+
+        if any(term in text for term in emergency_terms):
+            topic = "emergency_plumbing"
+            result = await self._execute_tool("get_faqs", {"topic": topic})
+            return [{"name": "get_faqs", "arguments": {"topic": topic}, "result": result}]
+
+        for key, topic in topic_map.items():
+            if key in text:
+                if topic == "hours":
+                    result = await self._execute_tool("get_working_hours", {})
+                    return [{"name": "get_working_hours", "arguments": {}, "result": result}]
+
+                result = await self._execute_tool("get_policies", {"topic": topic})
+                return [{"name": "get_policies", "arguments": {"topic": topic}, "result": result}]
+
+        if "services" in text or "service" in text:
+            result = await self._execute_tool("get_business_services", {})
+            return [{"name": "get_business_services", "arguments": {}, "result": result}]
+
+        if "booking" in text and "status" in text:
+            result = await self._execute_tool("get_latest_booking", {"customer_phone": self.caller_phone})
+            return [{"name": "get_latest_booking", "arguments": {"customer_phone": self.caller_phone}, "result": result}]
+
+        if any(phrase in text for phrase in ["do you handle", "can you fix", "do you do"]):
+            topic = "services"
+            result = await self._execute_tool("get_faqs", {"topic": topic})
+            return [{"name": "get_faqs", "arguments": {"topic": topic}, "result": result}]
+
+        return []
 
     async def _on_transcript(self, result: TranscriptResult) -> None:
         """Handle transcript from STT."""

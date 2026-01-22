@@ -236,6 +236,7 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         tools: Optional[list] = None,
         tool_executor: Optional[Callable[[str, dict], Any]] = None,
         max_tool_calls: int = 2,
+        prefetched_tools: Optional[list[dict]] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Stream a response with tool calling.
@@ -257,6 +258,25 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
             *conversation_history,
             {"role": "user", "content": user_message},
         ]
+        if prefetched_tools:
+            for idx, tool in enumerate(prefetched_tools, start=1):
+                tool_call_id = f"prefetch_{idx}"
+                messages.append({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "arguments": json.dumps(tool.get("arguments", {})),
+                        },
+                    }],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps(tool.get("result", {})),
+                })
 
         tool_calls_used = 0
         tool_definitions = tools or []
@@ -273,6 +293,7 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
                 temperature=0.7,
                 stream=True,
                 tools=tool_definitions or None,
+                tool_choice="auto",
             )
 
             async for chunk in stream:
@@ -307,6 +328,11 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
                 except json.JSONDecodeError:
                     tool_args = {}
 
+                missing_info = self._validate_tool_args(tool_call_name, tool_args)
+                if missing_info:
+                    yield {"type": "content", "text": missing_info}
+                    break
+
                 yield {"type": "tool_call", "name": tool_call_name, "arguments": tool_args}
 
                 tool_result = await tool_executor(tool_call_name, tool_args)
@@ -331,6 +357,17 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
                 continue
 
             break
+
+    def _validate_tool_args(self, tool_name: str, tool_args: dict) -> Optional[str]:
+        """Validate tool args and return a user prompt if required fields are missing."""
+        if tool_name in {"get_policies", "get_faqs"}:
+            if not tool_args.get("topic"):
+                return "Which topic should I check? For example: cancellation, pricing, or parking."
+        if tool_name == "get_booking_by_id" and not tool_args.get("booking_id"):
+            return "Do you have the booking ID?"
+        if tool_name == "get_latest_booking" and not tool_args.get("customer_phone"):
+            return "Can I grab the mobile number on the booking?"
+        return None
 
 
 # Singleton instance

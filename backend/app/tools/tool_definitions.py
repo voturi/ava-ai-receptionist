@@ -9,10 +9,9 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "business_id": {"type": "string"},
                     "customer_phone": {"type": "string"},
                 },
-                "required": ["business_id", "customer_phone"],
+                "required": ["customer_phone"],
                 "additionalProperties": False,
             },
         },
@@ -25,10 +24,9 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "business_id": {"type": "string"},
                     "booking_id": {"type": "string"},
                 },
-                "required": ["business_id", "booking_id"],
+                "required": ["booking_id"],
                 "additionalProperties": False,
             },
         },
@@ -40,10 +38,8 @@ TOOLS = [
             "description": "Get the list of services offered by a business.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "business_id": {"type": "string"},
-                },
-                "required": ["business_id"],
+                "properties": {},
+                "required": [],
                 "additionalProperties": False,
             },
         },
@@ -55,10 +51,8 @@ TOOLS = [
             "description": "Get working hours for a business.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "business_id": {"type": "string"},
-                },
-                "required": ["business_id"],
+                "properties": {},
+                "required": [],
                 "additionalProperties": False,
             },
         },
@@ -71,10 +65,9 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "business_id": {"type": "string"},
                     "topic": {"type": "string"},
                 },
-                "required": ["business_id", "topic"],
+                "required": ["topic"],
                 "additionalProperties": False,
             },
         },
@@ -87,10 +80,9 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "business_id": {"type": "string"},
                     "topic": {"type": "string"},
                 },
-                "required": ["business_id", "topic"],
+                "required": ["topic"],
                 "additionalProperties": False,
             },
         },

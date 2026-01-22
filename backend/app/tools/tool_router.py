@@ -26,6 +26,8 @@ class ToolRouter:
     ) -> dict[str, Any]:
         if not business_id:
             return {"error": "missing_business_id"}
+        if arguments and "business_id" in arguments:
+            arguments = {k: v for k, v in arguments.items() if k != "business_id"}
 
         if tool_name == "get_latest_booking":
             customer_phone = arguments.get("customer_phone") or caller_phone
