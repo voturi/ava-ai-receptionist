@@ -1,6 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models import Business, Call, Booking
+from app.models import Business, Call, Booking, Policy, FAQ
 from typing import Optional, List
 from datetime import datetime
 import uuid
@@ -153,7 +153,29 @@ class DBService:
             .limit(limit)
         )
         return result.scalars().all()
-    
+
+    async def get_latest_booking_by_phone(
+        self,
+        business_id: str,
+        customer_phone: str,
+    ) -> Optional[Booking]:
+        """Get the most recent booking by customer phone within a business."""
+        try:
+            b_uuid = uuid.UUID(business_id)
+        except ValueError:
+            return None
+
+        result = await self.session.execute(
+            select(Booking)
+            .where(
+                Booking.business_id == b_uuid,
+                Booking.customer_phone == customer_phone,
+            )
+            .order_by(Booking.booking_datetime.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
     async def update_booking(
         self, 
         booking_id: str, 
@@ -167,3 +189,99 @@ class DBService:
             await self.session.commit()
             await self.session.refresh(booking)
         return booking
+
+    # ==================== POLICIES ====================
+
+    async def create_policy(self, data: dict) -> Policy:
+        """Create a new policy."""
+        policy = Policy(**data)
+        self.session.add(policy)
+        await self.session.commit()
+        await self.session.refresh(policy)
+        return policy
+
+    async def get_policies(
+        self,
+        business_id: str,
+        topic: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Policy]:
+        """Get policies for a business, optionally filtered by topic."""
+        try:
+            b_uuid = uuid.UUID(business_id)
+        except ValueError:
+            return []
+
+        query = select(Policy).where(Policy.business_id == b_uuid)
+        if topic:
+            query = query.where(Policy.topic == topic)
+        query = query.order_by(Policy.updated_at.desc()).limit(limit)
+
+        result = await self.session.execute(query)
+        return result.scalars().all()
+
+    async def update_policy(self, policy_id: str, data: dict) -> Optional[Policy]:
+        """Update a policy by ID."""
+        try:
+            p_uuid = uuid.UUID(policy_id)
+        except ValueError:
+            return None
+
+        result = await self.session.execute(
+            select(Policy).where(Policy.id == p_uuid)
+        )
+        policy = result.scalar_one_or_none()
+        if policy:
+            for key, value in data.items():
+                setattr(policy, key, value)
+            await self.session.commit()
+            await self.session.refresh(policy)
+        return policy
+
+    # ==================== FAQS ====================
+
+    async def create_faq(self, data: dict) -> FAQ:
+        """Create a new FAQ."""
+        faq = FAQ(**data)
+        self.session.add(faq)
+        await self.session.commit()
+        await self.session.refresh(faq)
+        return faq
+
+    async def get_faqs(
+        self,
+        business_id: str,
+        topic: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[FAQ]:
+        """Get FAQs for a business, optionally filtered by topic."""
+        try:
+            b_uuid = uuid.UUID(business_id)
+        except ValueError:
+            return []
+
+        query = select(FAQ).where(FAQ.business_id == b_uuid)
+        if topic:
+            query = query.where(FAQ.topic == topic)
+        query = query.order_by(FAQ.updated_at.desc()).limit(limit)
+
+        result = await self.session.execute(query)
+        return result.scalars().all()
+
+    async def update_faq(self, faq_id: str, data: dict) -> Optional[FAQ]:
+        """Update an FAQ by ID."""
+        try:
+            f_uuid = uuid.UUID(faq_id)
+        except ValueError:
+            return None
+
+        result = await self.session.execute(
+            select(FAQ).where(FAQ.id == f_uuid)
+        )
+        faq = result.scalar_one_or_none()
+        if faq:
+            for key, value in data.items():
+                setattr(faq, key, value)
+            await self.session.commit()
+            await self.session.refresh(faq)
+        return faq

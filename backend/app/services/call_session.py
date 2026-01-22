@@ -25,6 +25,8 @@ from app.services.streaming_ai_service import streaming_ai_service
 from app.integrations.twilio_client import twilio_client
 from app.core.database import AsyncSessionLocal
 from app.services.db_service import DBService
+from app.tools.tool_router import ToolRouter
+from app.tools.tool_definitions import TOOLS
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -120,6 +122,11 @@ class CallSession:
     # Background tasks
     _tasks: list = field(default_factory=list)
 
+    # Tooling
+    tool_router: ToolRouter = field(default_factory=ToolRouter)
+    tool_context: dict = field(default_factory=dict)
+    tool_history: list = field(default_factory=list)
+
     def __post_init__(self):
         self.metrics = CallMetrics(call_sid=self.call_sid)
         self.metrics.started_at = datetime.utcnow()
@@ -139,6 +146,9 @@ class CallSession:
         Time:        {datetime.now().strftime('%H:%M:%S')}
         ════════════════════════════════════════
         """)
+
+        # Load business context
+        await self._load_business_context()
 
         # Initialize STT connection (Deepgram Nova)
         await self._connect_stt()
@@ -303,7 +313,7 @@ class CallSession:
                 on_audio=self._on_tts_audio,
                 on_complete=self._on_tts_complete,
                 config=TTSConfig(
-                    model="aura-asteria-en",  # Female voice
+                    model="aura-asteria-en",  # Default voice
                     sample_rate=8000,
                     encoding="mulaw",
                 ),
@@ -404,12 +414,24 @@ class CallSession:
         full_response = ""
 
         try:
-            # Stream LLM response directly to TTS
-            async for chunk in streaming_ai_service.get_response_with_buffer(
+            # Stream LLM response with tools (mid-stream tool calling)
+            buffer = ""
+            async for event in streaming_ai_service.stream_with_tools(
                 user_message=user_text,
-                conversation_history=self.conversation_history[:-1],  # Exclude the user message we just added
-                business_name=self.business_name,
+                conversation_history=self.conversation_history[:-1],
+                business_profile=self._get_business_profile(),
+                tools=TOOLS,
+                tool_executor=self._execute_tool,
+                max_tool_calls=2,
             ):
+                if event.get("type") == "tool_call":
+                    self.tool_history.append(event)
+                    continue
+
+                chunk = event.get("text", "")
+                if not chunk:
+                    continue
+
                 # Track first token timing
                 if not first_token_received:
                     first_token_received = True
@@ -417,9 +439,14 @@ class CallSession:
                     print(f"⚡ LLM first token: {llm_latency:.0f}ms")
 
                 full_response += chunk
+                buffer += chunk
 
-                # Send directly to TTS (streaming!)
-                await self.tts_connection.send_text(chunk)
+                if streaming_ai_service._should_yield(buffer, min_size=10):
+                    await self.tts_connection.send_text(buffer)
+                    buffer = ""
+
+            if buffer:
+                await self.tts_connection.send_text(buffer)
 
             # Signal end of text to TTS
             await self.tts_connection.flush()
@@ -535,6 +562,42 @@ class CallSession:
 
         except Exception as e:
             print(f"❌ Error updating call record: {e}")
+
+    async def _load_business_context(self) -> None:
+        """Load business context from the database."""
+        try:
+            async with AsyncSessionLocal() as session:
+                db_service = DBService(session)
+                business = await db_service.get_business(self.business_id)
+                if not business:
+                    return
+                self.business_name = business.name
+                self.business_config = {
+                    "business_name": business.name,
+                    "industry": business.industry,
+                    "ai_config": business.ai_config or {},
+                    "services": business.services or [],
+                    "working_hours": business.working_hours or {},
+                }
+        except Exception as e:
+            print(f"⚠️ Failed to load business context: {e}")
+
+    def _get_business_profile(self) -> dict:
+        """Return a business profile for prompt generation."""
+        profile = dict(self.business_config or {})
+        profile.setdefault("business_name", self.business_name)
+        return profile
+
+    async def _execute_tool(self, tool_name: str, arguments: dict) -> dict:
+        """Execute a tool call with tenant context."""
+        result = await self.tool_router.execute(
+            tool_name,
+            arguments,
+            business_id=self.business_id,
+            caller_phone=self.caller_phone,
+        )
+        self.tool_context[tool_name] = result
+        return result
 
     async def _on_transcript(self, result: TranscriptResult) -> None:
         """Handle transcript from STT."""

@@ -8,7 +8,8 @@ enabling low-latency text-to-speech synthesis.
 from __future__ import annotations
 
 import os
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Callable, Optional
+import json
 
 from openai import AsyncOpenAI
 
@@ -26,7 +27,11 @@ class StreamingAIService:
         # Use gpt-4o-mini for faster responses (good balance of speed/quality)
         self.model = "gpt-4o-mini"
 
-    def get_system_prompt(self, business_name: str = "our business") -> str:
+    def get_system_prompt(
+        self,
+        business_name: str = "our business",
+        business_config: Optional[dict] = None,
+    ) -> str:
         """
         System prompt optimized for voice conversations.
 
@@ -35,14 +40,57 @@ class StreamingAIService:
         - Natural speech patterns
         - No markdown or formatting
         """
-        return f"""You are Sarah, the AI receptionist for {business_name}.
+        if business_config is None:
+            business_config = {}
 
-VOICE CONVERSATION RULES:
+        ai_config = business_config.get("ai_config") or {}
+        industry = business_config.get("industry") or "business"
+        services = business_config.get("services") or []
+        working_hours = business_config.get("working_hours") or {}
+
+        tone = ai_config.get("tone", "warm, friendly, and professional")
+        language = ai_config.get("language", "en-AU")
+
+        services_summary = ", ".join(
+            service.get("name", str(service)) if isinstance(service, dict) else str(service)
+            for service in services[:8]
+        )
+        if not services_summary:
+            services_summary = "Ask if the caller needs a service."
+
+        working_hours_summary = ", ".join(
+            f"{day}: {hours}" for day, hours in list(working_hours.items())[:7]
+        )
+        if not working_hours_summary:
+            working_hours_summary = "Ask if the caller needs business hours."
+
+        return f"""You are Echo, the AI receptionist for {business_name} ({industry}).
+
+TONE AND LANGUAGE:
+- Tone: {tone}
+- Language: {language}
 - Keep responses SHORT: 1-2 sentences, 15-25 words max
 - Sound natural and warm, like a friendly human
-- Use Australian expressions: "no worries", "lovely", "arvo"
 - Never use bullet points, lists, or formatted text
 - Don't say "I'm an AI" - just be helpful
+
+BUSINESS CONTEXT:
+- Services: {services_summary}
+- Working hours: {working_hours_summary}
+
+TOOLS:
+- Use tools only when you need fresh, tenant-specific data.
+- Max 2 tool calls per user turn.
+- If a tool fails or times out, reply with:
+  "I'm having trouble pulling that up right now. Would you like me to take a message?"
+- Policies/FAQs require a topic string.
+- Suggested policy/FAQ topics: cancellation, reschedule, late arrival, deposits,
+  refunds, pricing, hours, location, parking.
+- Booking lookups must use customer_phone from the call.
+- If you need a tool, call it BEFORE responding.
+
+VOICE CONVERSATION RULES:
+- Use Australian expressions: "no worries", "lovely", "arvo"
 
 BOOKING FLOW (one step at a time, don't skip any):
 1. What service do they need?
@@ -179,6 +227,110 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
 
         # Yield if buffer is getting too long
         return len(buffer) >= 50
+
+    async def stream_with_tools(
+        self,
+        user_message: str,
+        conversation_history: Optional[list] = None,
+        business_profile: Optional[dict] = None,
+        tools: Optional[list] = None,
+        tool_executor: Optional[Callable[[str, dict], Any]] = None,
+        max_tool_calls: int = 2,
+    ) -> AsyncGenerator[dict, None]:
+        """
+        Stream a response with tool calling.
+
+        Yields events:
+        - {"type": "content", "text": "..."}
+        - {"type": "tool_call", "name": "...", "arguments": {...}}
+        """
+        if conversation_history is None:
+            conversation_history = []
+
+        system_prompt = self.get_system_prompt(
+            business_name=(business_profile or {}).get("business_name", "our business"),
+            business_config=business_profile or {},
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            *conversation_history,
+            {"role": "user", "content": user_message},
+        ]
+
+        tool_calls_used = 0
+        tool_definitions = tools or []
+
+        while True:
+            tool_call_name = None
+            tool_call_id = None
+            tool_args_json = ""
+
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=150,
+                temperature=0.7,
+                stream=True,
+                tools=tool_definitions or None,
+            )
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+
+                if getattr(delta, "tool_calls", None):
+                    for call in delta.tool_calls:
+                        if call.id:
+                            tool_call_id = call.id
+                        if call.function and call.function.name:
+                            tool_call_name = call.function.name
+                        if call.function and call.function.arguments:
+                            tool_args_json += call.function.arguments
+                    continue
+
+                if delta.content:
+                    if tool_call_name:
+                        continue
+                    yield {"type": "content", "text": delta.content}
+
+            if tool_call_name:
+                tool_calls_used += 1
+                if tool_calls_used > max_tool_calls or not tool_executor:
+                    yield {
+                        "type": "content",
+                        "text": "I'm having trouble pulling that up right now. Would you like me to take a message?",
+                    }
+                    break
+
+                try:
+                    tool_args = json.loads(tool_args_json or "{}")
+                except json.JSONDecodeError:
+                    tool_args = {}
+
+                yield {"type": "tool_call", "name": tool_call_name, "arguments": tool_args}
+
+                tool_result = await tool_executor(tool_call_name, tool_args)
+
+                tool_call_id = tool_call_id or f"tool_call_{tool_calls_used}"
+                messages.append({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call_name,
+                            "arguments": json.dumps(tool_args),
+                        },
+                    }],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps(tool_result),
+                })
+                continue
+
+            break
 
 
 # Singleton instance

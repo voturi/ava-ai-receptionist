@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -22,6 +22,22 @@ class VoiceConfigPayload(BaseModel):
     speed: float = 1.0
     pitch: float = 0.0
     style: str | None = None
+
+
+class PolicyPayload(BaseModel):
+    """Payload for creating or updating a policy."""
+
+    topic: str = Field(..., min_length=1, max_length=100)
+    content: str = Field(..., min_length=1)
+
+
+class FAQPayload(BaseModel):
+    """Payload for creating or updating a FAQ."""
+
+    topic: str = Field(..., min_length=1, max_length=100)
+    question: str = Field(..., min_length=1)
+    answer: str = Field(..., min_length=1)
+    tags: list[str] = Field(default_factory=list)
 
 
 @router.post("/greeting/{business_id}")
@@ -142,3 +158,193 @@ async def update_voice_config(
     await db_service.update_business(business_id, {"ai_config": ai_config})
 
     return {"status": "ok", "voice": ai_config["voice"]}
+
+
+@router.post("/policies/{business_id}")
+async def create_policy(
+    business_id: str,
+    payload: PolicyPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a policy for a business."""
+    db_service = DBService(db)
+    business = await db_service.get_business(business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    policy = await db_service.create_policy({
+        "business_id": business_id,
+        "topic": payload.topic,
+        "content": payload.content,
+    })
+
+    return {
+        "status": "ok",
+        "policy": {
+            "id": str(policy.id),
+            "business_id": str(policy.business_id),
+            "topic": policy.topic,
+            "content": policy.content,
+            "updated_at": policy.updated_at,
+        },
+    }
+
+
+@router.put("/policies/{business_id}/{policy_id}")
+async def update_policy(
+    business_id: str,
+    policy_id: str,
+    payload: PolicyPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a policy by ID."""
+    db_service = DBService(db)
+    business = await db_service.get_business(business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    policy = await db_service.update_policy(policy_id, {
+        "topic": payload.topic,
+        "content": payload.content,
+    })
+    if not policy or str(policy.business_id) != str(business.id):
+        raise HTTPException(status_code=404, detail="Policy not found")
+
+    return {
+        "status": "ok",
+        "policy": {
+            "id": str(policy.id),
+            "business_id": str(policy.business_id),
+            "topic": policy.topic,
+            "content": policy.content,
+            "updated_at": policy.updated_at,
+        },
+    }
+
+
+@router.get("/policies/{business_id}")
+async def list_policies(
+    business_id: str,
+    topic: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List policies for a business, optionally filtered by topic."""
+    db_service = DBService(db)
+    business = await db_service.get_business(business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    policies = await db_service.get_policies(business_id, topic=topic)
+    return {
+        "status": "ok",
+        "policies": [
+            {
+                "id": str(policy.id),
+                "business_id": str(policy.business_id),
+                "topic": policy.topic,
+                "content": policy.content,
+                "updated_at": policy.updated_at,
+            }
+            for policy in policies
+        ],
+    }
+
+
+@router.post("/faqs/{business_id}")
+async def create_faq(
+    business_id: str,
+    payload: FAQPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create an FAQ for a business."""
+    db_service = DBService(db)
+    business = await db_service.get_business(business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    faq = await db_service.create_faq({
+        "business_id": business_id,
+        "topic": payload.topic,
+        "question": payload.question,
+        "answer": payload.answer,
+        "tags": payload.tags,
+    })
+
+    return {
+        "status": "ok",
+        "faq": {
+            "id": str(faq.id),
+            "business_id": str(faq.business_id),
+            "topic": faq.topic,
+            "question": faq.question,
+            "answer": faq.answer,
+            "tags": faq.tags,
+            "updated_at": faq.updated_at,
+        },
+    }
+
+
+@router.put("/faqs/{business_id}/{faq_id}")
+async def update_faq(
+    business_id: str,
+    faq_id: str,
+    payload: FAQPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an FAQ by ID."""
+    db_service = DBService(db)
+    business = await db_service.get_business(business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    faq = await db_service.update_faq(faq_id, {
+        "topic": payload.topic,
+        "question": payload.question,
+        "answer": payload.answer,
+        "tags": payload.tags,
+    })
+    if not faq or str(faq.business_id) != str(business.id):
+        raise HTTPException(status_code=404, detail="FAQ not found")
+
+    return {
+        "status": "ok",
+        "faq": {
+            "id": str(faq.id),
+            "business_id": str(faq.business_id),
+            "topic": faq.topic,
+            "question": faq.question,
+            "answer": faq.answer,
+            "tags": faq.tags,
+            "updated_at": faq.updated_at,
+        },
+    }
+
+
+@router.get("/faqs/{business_id}")
+async def list_faqs(
+    business_id: str,
+    topic: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List FAQs for a business, optionally filtered by topic."""
+    db_service = DBService(db)
+    business = await db_service.get_business(business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    faqs = await db_service.get_faqs(business_id, topic=topic)
+    return {
+        "status": "ok",
+        "faqs": [
+            {
+                "id": str(faq.id),
+                "business_id": str(faq.business_id),
+                "topic": faq.topic,
+                "question": faq.question,
+                "answer": faq.answer,
+                "tags": faq.tags,
+                "updated_at": faq.updated_at,
+            }
+            for faq in faqs
+        ],
+    }
