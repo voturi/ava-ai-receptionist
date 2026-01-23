@@ -39,7 +39,7 @@ WS_HEADERS_PARAM = "additional_headers" if "additional_headers" in _ws_connect_p
 class TTSConfig:
     """Configuration for Deepgram TTS."""
 
-    model: str = "aura-asteria-en"  # Default voice
+    model: str = "aura-athena-en"  # Default voice
     sample_rate: int = 8000  # Twilio requires 8kHz
     encoding: str = "mulaw"  # Twilio requires μ-law
     container: str = "none"  # Raw audio, no container

@@ -14,15 +14,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Optional
+from zoneinfo import ZoneInfo
 
 from app.integrations.stt import DeepgramStreamingSTT
 from app.integrations.stt.deepgram_streaming import TranscriptResult, STTConfig
 from app.integrations.tts import DeepgramStreamingTTS, TTSConfig
 from app.services.streaming_ai_service import streaming_ai_service
 from app.integrations.twilio_client import twilio_client
+from app.integrations.providers.registry import resolve_provider, get_provider_config
+from app.integrations.providers.base import BookingContext, CustomerInfo
 from app.core.database import AsyncSessionLocal
 from app.services.db_service import DBService
 from app.tools.tool_router import ToolRouter
@@ -107,6 +112,7 @@ class CallSession:
     conversation_history: list = field(default_factory=list)
     collected_data: dict = field(default_factory=dict)
     current_transcript: str = ""
+    booking_created: bool = False
 
     # Speaking state
     is_user_speaking: bool = False
@@ -475,6 +481,9 @@ class CallSession:
             total_latency = (datetime.utcnow() - llm_start).total_seconds() * 1000
             print(f"🤖 AI Response ({total_latency:.0f}ms): {full_response}")
 
+            # Attempt booking creation if we have enough details
+            await self._maybe_create_booking(full_response)
+
             # Update call record with transcript
             await self._update_call_record()
 
@@ -513,14 +522,12 @@ class CallSession:
             "goodbye", "bye!", "see you", "take care", "all sorted"
         ])
 
-        # Check if this looks like end of conversation
-        if user_farewell and ai_farewell:
-            print("📞 Call ending detected (mutual farewell)")
+        # End if either side clearly says goodbye/thanks
+        if ai_farewell:
+            print("📞 Call ending detected (AI farewell)")
             return True
-
-        # AI explicitly ending with goodbye
-        if "goodbye" in ai_lower or ai_lower.rstrip().endswith("bye!"):
-            print("📞 Call ending detected (AI goodbye)")
+        if user_farewell:
+            print("📞 Call ending detected (User farewell)")
             return True
 
         return False
@@ -598,6 +605,8 @@ class CallSession:
                 business = await db_service.get_business(self.business_id)
                 if not business:
                     return
+                policies = await db_service.get_policies(self.business_id, topic=None, limit=10)
+                faqs = await db_service.get_faqs(self.business_id, topic=None, limit=10)
                 self.business_name = business.name
                 self.business_config = {
                     "business_name": business.name,
@@ -605,6 +614,8 @@ class CallSession:
                     "ai_config": business.ai_config or {},
                     "services": business.services or [],
                     "working_hours": business.working_hours or {},
+                    "policies_summary": self._format_policies_summary(policies),
+                    "faqs_summary": self._format_faqs_summary(faqs),
                 }
         except Exception as e:
             print(f"⚠️ Failed to load business context: {e}")
@@ -628,63 +639,309 @@ class CallSession:
         self.tool_context[tool_name] = result
         return result
 
+    async def _maybe_create_booking(self, ai_response_text: str) -> None:
+        """Create a booking if conversation indicates completion and data is sufficient."""
+        if self.booking_created:
+            return
+        if not self.call_id:
+            return
+
+        service = self._extract_service_from_history()
+        collected = {"service": service} if service else {}
+
+        requested_dt = self._extract_datetime_from_history(self.conversation_history)
+        if requested_dt is None and ai_response_text:
+            requested_dt = self._extract_datetime_from_text(ai_response_text)
+        customer_name = self._extract_name(self.conversation_history)
+        customer_phone = self.caller_phone or ""
+        if customer_name == "Customer" or not customer_phone:
+            return
+
+        has_datetime = requested_dt is not None
+        if not (service and has_datetime):
+            return
+
+        provider_config = get_provider_config(self.business_config.get("ai_config"))
+        provider = resolve_provider(provider_config)
+        context = BookingContext(
+            business_id=self.business_id,
+            business_name=self.business_name,
+            service=service or "General",
+            requested_datetime=requested_dt,
+            customer=CustomerInfo(
+                name=customer_name,
+                phone=customer_phone,
+            ),
+            metadata=provider_config,
+        )
+
+        availability = await provider.check_availability(context)
+        if not availability.available:
+            return
+
+        intent = await provider.create_booking(context)
+        if intent.status == "declined":
+            return
+
+        booking_datetime = requested_dt or self._local_now()
+        internal_notes = None
+        if intent.external_reference:
+            internal_notes = f"Provider reference: {intent.external_reference}"
+
+        async with AsyncSessionLocal() as session:
+            db_service = DBService(session)
+            booking = await db_service.create_booking({
+                "business_id": self.business_id,
+                "call_id": self.call_id,
+                "customer_name": customer_name,
+                "customer_phone": customer_phone,
+                "service": service or "General",
+                "booking_datetime": booking_datetime,
+                "status": intent.status,
+                "confirmed_at": datetime.utcnow() if intent.status == "confirmed" else None,
+                "internal_notes": internal_notes,
+                "customer_notes": self._extract_issue_summary(),
+            })
+
+        self.booking_created = True
+
+        try:
+            booking_date = booking_datetime.strftime("%A %d %b %Y at %I:%M %p")
+            sms_message = (
+                f"Hi {customer_name}! Your {service or 'service'} appointment at "
+                f"{self.business_name} is confirmed for {booking_date}."
+            )
+            if intent.message_override:
+                sms_message = intent.message_override
+            twilio_client.send_sms(customer_phone, sms_message)
+        except Exception as e:
+            print(f"❌ ERROR sending SMS: {e}")
+
+        print(f"✅ BOOKING CREATED: {booking.id} ({customer_name}, {service})")
+
+    def _is_booking_complete(self, collected_data: dict, history: list, ai_response_text: str = "") -> bool:
+        completion_signals = [
+            "all set", "i'll sms you", "i will sms", "sms you soon",
+            "confirmed", "booked", "appointment is set", "you're all set",
+            "everything is confirmed", "i'll book", "i will book",
+            "i'll schedule", "i will schedule", "thanks for confirming"
+        ]
+        ai_text_lower = ai_response_text.lower()
+        has_completion_signal = any(signal in ai_text_lower for signal in completion_signals)
+        if not has_completion_signal:
+            return False
+
+        has_service = "service" in collected_data and collected_data["service"]
+        has_name = self._extract_name(history) != "Customer"
+        has_phone = bool(self.caller_phone)
+        has_datetime = (
+            self._extract_datetime_from_history(history) is not None
+            or self._extract_datetime_from_text(ai_response_text) is not None
+        )
+
+        if has_service and has_name and has_phone and has_datetime:
+            return True
+
+        print(
+            f"🔎 Booking incomplete: service={has_service} name={has_name} "
+            f"phone={has_phone} datetime={has_datetime}"
+        )
+        return False
+
+    def _extract_name(self, history: list) -> str:
+        for msg in reversed(history):
+            if msg.get("role") == "user":
+                content = msg.get("content", "").strip()
+                content_lower = content.lower()
+                if "my name is" in content_lower:
+                    name = content_lower.split("my name is")[-1].strip()
+                    return name.split()[0].capitalize() if name else "Customer"
+                if "i'm" in content_lower or "i am" in content_lower:
+                    cleaned = content_lower.replace("i'm", "").replace("i am", "").strip()
+                    words = cleaned.split()
+                    if words:
+                        return words[0].capitalize()
+                if "this is" in content_lower:
+                    name = content_lower.split("this is")[-1].strip()
+                    return name.split()[0].capitalize() if name else "Customer"
+                if " and my" in content_lower:
+                    name = content_lower.split(" and my")[0].strip()
+                    return name.split()[0].capitalize() if name else "Customer"
+                words = [w for w in content.split() if w.isalpha()]
+                if words and len(words) <= 2 and not any(ch.isdigit() for ch in content):
+                    return words[0].capitalize()
+        return "Customer"
+
+    def _extract_datetime_from_history(self, history: list) -> datetime | None:
+        weekdays = {
+            "monday": 0,
+            "tuesday": 1,
+            "wednesday": 2,
+            "thursday": 3,
+            "friday": 4,
+            "saturday": 5,
+            "sunday": 6,
+        }
+
+        time_pattern = re.compile(r"(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?", re.IGNORECASE)
+
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            content_lower = content.lower()
+
+            day = None
+            for name, idx in weekdays.items():
+                if name in content_lower:
+                    day = idx
+                    break
+
+            time_match = time_pattern.search(content_lower)
+            if day is None and not time_match:
+                continue
+
+            now = self._local_now()
+            target_date = now
+            if day is not None:
+                days_ahead = (day - now.weekday() + 7) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                if "next week" in content_lower:
+                    days_ahead += 7
+                target_date = now + timedelta(days=days_ahead)
+
+            hour = 9
+            minute = 0
+            if time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2) or 0)
+                meridiem = (time_match.group(3) or "").lower()
+                if meridiem == "pm" and hour < 12:
+                    hour += 12
+                if meridiem == "am" and hour == 12:
+                    hour = 0
+            elif "afternoon" in content_lower or "arvo" in content_lower:
+                hour = 15
+            elif "morning" in content_lower:
+                hour = 10
+
+            return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        return None
+
+    def _extract_datetime_from_text(self, text: str) -> datetime | None:
+        if not text:
+            return None
+        content_lower = text.lower()
+        weekdays = {
+            "monday": 0,
+            "tuesday": 1,
+            "wednesday": 2,
+            "thursday": 3,
+            "friday": 4,
+            "saturday": 5,
+            "sunday": 6,
+        }
+        time_pattern = re.compile(r"(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?", re.IGNORECASE)
+        day = None
+        for name, idx in weekdays.items():
+            if name in content_lower:
+                day = idx
+                break
+        time_match = time_pattern.search(content_lower)
+        if day is None and not time_match and "tomorrow" not in content_lower:
+            return None
+        now = self._local_now()
+        target_date = now
+        if "tomorrow" in content_lower:
+            target_date = now + timedelta(days=1)
+        elif day is not None:
+            days_ahead = (day - now.weekday() + 7) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            if "next week" in content_lower:
+                days_ahead += 7
+            target_date = now + timedelta(days=days_ahead)
+        hour = 9
+        minute = 0
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2) or 0)
+            meridiem = (time_match.group(3) or "").lower()
+            if meridiem == "pm" and hour < 12:
+                hour += 12
+            if meridiem == "am" and hour == 12:
+                hour = 0
+        elif "afternoon" in content_lower or "arvo" in content_lower:
+            hour = 15
+        elif "morning" in content_lower:
+            hour = 10
+        return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def _local_now(self) -> datetime:
+        """Return current time in Australia/Sydney as naive local time."""
+        local = datetime.now(ZoneInfo("Australia/Sydney"))
+        return local.replace(tzinfo=None)
+
+    def _extract_service_from_history(self) -> Optional[str]:
+        services = self.business_config.get("services") or []
+        if not services:
+            return None
+        history_text = " ".join(
+            msg.get("content", "").lower() for msg in self.conversation_history
+        )
+        for service in services:
+            if isinstance(service, dict):
+                name = str(service.get("name", "")).lower()
+            else:
+                name = str(service).lower()
+            if name and name in history_text:
+                return str(service.get("name")) if isinstance(service, dict) else str(service)
+        return None
+
+    def _extract_issue_summary(self) -> Optional[str]:
+        """Return the most recent user utterance as issue summary."""
+        for msg in reversed(self.conversation_history):
+            if msg.get("role") == "user":
+                content = msg.get("content", "").strip()
+                return content[:500] if content else None
+        return None
+
+    def _format_policies_summary(self, policies: list) -> str:
+        if not policies:
+            return "Not provided."
+        parts = []
+        for policy in policies:
+            parts.append(f"{policy.topic}: {policy.content}")
+        return " | ".join(parts)[:1200]
+
+    def _format_faqs_summary(self, faqs: list) -> str:
+        if not faqs:
+            return "Not provided."
+        parts = []
+        for faq in faqs:
+            parts.append(f"Q: {faq.question} A: {faq.answer}")
+        return " | ".join(parts)[:1200]
+
     async def _prefetch_tools(self, user_text: str) -> list[dict]:
         """Deterministically prefetch tools for common intents (MVP heuristic)."""
         text = user_text.lower()
-
-        topic_map = {
-            "cancellation": "cancellation",
-            "cancel": "cancellation",
-            "reschedule": "reschedule",
-            "late": "late_arrival",
-            "deposit": "deposits",
-            "refund": "refunds",
-            "price": "pricing",
-            "pricing": "pricing",
-            "hours": "hours",
-            "open": "hours",
-            "close": "hours",
-            "location": "location",
-            "parking": "parking",
-        }
-
-        emergency_terms = [
-            "emergency",
-            "burst pipe",
-            "flood",
-            "sewage",
-            "gas smell",
-            "no water",
-        ]
-
-        if any(term in text for term in emergency_terms):
-            topic = "emergency_plumbing"
-            result = await self._execute_tool("get_faqs", {"topic": topic})
-            return [{"name": "get_faqs", "arguments": {"topic": topic}, "result": result}]
-
-        for key, topic in topic_map.items():
-            if key in text:
-                if topic == "hours":
-                    result = await self._execute_tool("get_working_hours", {})
-                    return [{"name": "get_working_hours", "arguments": {}, "result": result}]
-
-                result = await self._execute_tool("get_policies", {"topic": topic})
-                return [{"name": "get_policies", "arguments": {"topic": topic}, "result": result}]
-
-        if "services" in text or "service" in text:
-            result = await self._execute_tool("get_business_services", {})
-            return [{"name": "get_business_services", "arguments": {}, "result": result}]
-
-        if "booking" in text and "status" in text:
+        prefetched: list[dict] = []
+        if any(
+            phrase in text for phrase in [
+                "booking status",
+                "status of my booking",
+                "booking confirmed",
+                "is my booking confirmed",
+                "did my booking go through",
+                "confirmation",
+            ]
+        ):
             result = await self._execute_tool("get_latest_booking", {"customer_phone": self.caller_phone})
-            return [{"name": "get_latest_booking", "arguments": {"customer_phone": self.caller_phone}, "result": result}]
+            prefetched.append({"name": "get_latest_booking", "arguments": {"customer_phone": self.caller_phone}, "result": result})
 
-        if any(phrase in text for phrase in ["do you handle", "can you fix", "do you do"]):
-            topic = "services"
-            result = await self._execute_tool("get_faqs", {"topic": topic})
-            return [{"name": "get_faqs", "arguments": {"topic": topic}, "result": result}]
-
-        return []
+        return prefetched
 
     async def _on_transcript(self, result: TranscriptResult) -> None:
         """Handle transcript from STT."""

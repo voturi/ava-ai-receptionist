@@ -39,7 +39,7 @@ class AIService:
         You: "Perfect! And your name?"
         Customer: "Sarah"
         You: "Great Sarah! Phone number for SMS confirmation?"
-        Customer: "0412 345 678"
+        Customer: "0412 345 
         You: "Brilliant! So that's a haircut Wednesday 2pm. I'll SMS you soon. All sorted!"
 
         IMPORTANT RULES:

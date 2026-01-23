@@ -1,4 +1,6 @@
 from sqlalchemy import select
+from sqlalchemy import or_
+import re
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Business, Call, Booking, Policy, FAQ
 from typing import Optional, List
@@ -214,7 +216,16 @@ class DBService:
 
         query = select(Policy).where(Policy.business_id == b_uuid)
         if topic:
-            query = query.where(Policy.topic == topic)
+            normalized = self._normalize_topic(topic)
+            aliases = self._topic_aliases(normalized)
+            print(f"🧭 Policy topic: raw='{topic}' normalized='{normalized}' aliases={aliases}")
+            query = query.where(
+                or_(
+                    Policy.topic == normalized,
+                    Policy.topic.in_(aliases),
+                    Policy.topic.ilike(f"%{normalized}%"),
+                )
+            )
         query = query.order_by(Policy.updated_at.desc()).limit(limit)
 
         result = await self.session.execute(query)
@@ -262,11 +273,46 @@ class DBService:
 
         query = select(FAQ).where(FAQ.business_id == b_uuid)
         if topic:
-            query = query.where(FAQ.topic == topic)
+            normalized = self._normalize_topic(topic)
+            aliases = self._topic_aliases(normalized)
+            print(f"🧭 FAQ topic: raw='{topic}' normalized='{normalized}' aliases={aliases}")
+            query = query.where(
+                or_(
+                    FAQ.topic == normalized,
+                    FAQ.topic.in_(aliases),
+                    FAQ.topic.ilike(f"%{normalized}%"),
+                )
+            )
         query = query.order_by(FAQ.updated_at.desc()).limit(limit)
 
         result = await self.session.execute(query)
         return result.scalars().all()
+
+    def _normalize_topic(self, topic: str) -> str:
+        value = topic.strip().lower()
+        value = value.replace("call out", "callout").replace("call-out", "callout")
+        value = re.sub(r"[^\w\\s-]", "", value)
+        value = re.sub(r"[\\s-]+", "_", value)
+        value = value.strip("_")
+        return value
+
+    def _topic_aliases(self, normalized: str) -> list[str]:
+        aliases = {
+            "call_out_fee": "callout_fee",
+            "callout_fee": "call_out_fee",
+            "after_hours": "afterhours",
+            "late": "late_arrival",
+            "late_arrival": "late",
+            "emergency": "emergency_plumbing",
+            "emergency_plumbing": "emergency",
+            "no_power": "power_outage",
+            "power_outage": "no_power",
+            "refund_policies": "refunds",
+            "refunds": "refund_policy",
+            "refund_policy": "refunds",
+        }
+        alias = aliases.get(normalized)
+        return [alias] if alias else []
 
     async def update_faq(self, faq_id: str, data: dict) -> Optional[FAQ]:
         """Update an FAQ by ID."""

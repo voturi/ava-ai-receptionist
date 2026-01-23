@@ -31,60 +31,63 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_business_services",
-            "description": "Get the list of services offered by a business.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_working_hours",
-            "description": "Get working hours for a business.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_policies",
-            "description": "Get policies for a business by topic.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topic": {"type": "string"},
-                },
-                "required": ["topic"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_faqs",
-            "description": "Get FAQs for a business by topic.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topic": {"type": "string"},
-                },
-                "required": ["topic"],
-                "additionalProperties": False,
-            },
-        },
-    },
+    # Tools below are intentionally disabled for MVP.
+    # Policies/FAQs are injected into the prompt context for SMBs.
+    # Re-enable later when dynamic retrieval is needed.
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "get_business_services",
+    #         "description": "Get the list of services offered by a business.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {},
+    #             "required": [],
+    #             "additionalProperties": False,
+    #         },
+    #     },
+    # },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "get_working_hours",
+    #         "description": "Get working hours for a business.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {},
+    #             "required": [],
+    #             "additionalProperties": False,
+    #         },
+    #     },
+    # },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "get_policies",
+    #         "description": "Get policies for a business by topic.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "topic": {"type": "string"},
+    #             },
+    #             "required": ["topic"],
+    #             "additionalProperties": False,
+    #         },
+    #     },
+    # },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "get_faqs",
+    #         "description": "Get FAQs for a business by topic.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "topic": {"type": "string"},
+    #             },
+    #             "required": ["topic"],
+    #             "additionalProperties": False,
+    #         },
+    #     },
+    # },
 ]
