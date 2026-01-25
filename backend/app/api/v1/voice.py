@@ -237,7 +237,8 @@ async def process_speech(
     print(f"⚠️ No filler configured - falling back to synchronous AI processing")
 
     # Get AI response (synchronous fallback)
-    ai_response = await ai_service.get_response(
+    ai_response = await ai_s
+    ervice.get_response(
         user_message=speech_result,
         conversation_history=conversation["history"],
         business_name=conversation.get("business_name", "our business")

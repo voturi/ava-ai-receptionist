@@ -119,6 +119,7 @@ class CallSession:
     is_ai_speaking: bool = False
     pending_end_call: bool = False
     pending_end_mark: str = "end_call"
+    awaiting_final_confirmation: bool = False
 
     # Metrics
     metrics: CallMetrics = field(default_factory=lambda: CallMetrics(call_sid=""))
@@ -136,9 +137,16 @@ class CallSession:
     tool_context: dict = field(default_factory=dict)
     tool_history: list = field(default_factory=list)
 
+    # Concurrency control (FIX #1: Prevent concurrent LLM processing)
+    _processing_lock: Optional[asyncio.Lock] = None
+    _utterance_debounce_task: Optional[asyncio.Task] = None
+    _last_utterance_time: float = 0.0
+
     def __post_init__(self):
         self.metrics = CallMetrics(call_sid=self.call_sid)
         self.metrics.started_at = datetime.utcnow()
+        # Initialize lock (can't use field(default_factory) for Lock)
+        self._processing_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """
@@ -312,7 +320,7 @@ class CallSession:
                     encoding="mulaw",
                     interim_results=True,
                     utterance_end_ms=2000,  # Wait 2s of silence before UtteranceEnd (allows thinking pauses)
-                    endpointing=1000,  # 1s silence for final transcript chunks
+                    endpointing=2500,  # FIX #3: Increased from 1000ms to 2500ms to allow natural speech pauses
                 ),
             )
             await self.stt_connection.connect()
@@ -481,53 +489,88 @@ class CallSession:
             total_latency = (datetime.utcnow() - llm_start).total_seconds() * 1000
             print(f"🤖 AI Response ({total_latency:.0f}ms): {full_response}")
 
-            # Attempt booking creation if we have enough details
-            await self._maybe_create_booking(full_response)
+            # Attempt booking creation only after we explicitly asked to finalize
+            booking_result = {"created": False, "confirmation_text": None}
+            asks_finalization = self._response_requests_finalization(full_response)
+            if asks_finalization:
+                self.awaiting_final_confirmation = True
+            if self.awaiting_final_confirmation and self._user_confirms_booking(user_text):
+                booking_result = await self._maybe_create_booking(full_response, user_text=user_text)
+            booking_created = booking_result.get("created", False)
+            confirmation_text = booking_result.get("confirmation_text")
 
             # Update call record with transcript
             await self._update_call_record()
 
+            # If AI sounded like it confirmed but booking was not created, correct course
+            if (
+                not booking_created
+                and not asks_finalization
+                and self._response_sounds_confirmed(full_response)
+                and self._user_confirms_booking(user_text)
+            ):
+                await self.speak(self._get_missing_booking_prompt(full_response))
+            if booking_created and confirmation_text and not self._response_sounds_confirmed(full_response):
+                await self.speak(confirmation_text)
+
             # Check if we should end the call
-            if self._should_end_call(user_text, full_response):
-                # End call after Twilio playback reaches mark
+            # Note: Pass booking_created state directly to handle timing issue
+            if self._should_end_call(user_text, full_response, booking_created):
+                print(f"📞 Scheduling call end after TTS completes...")
+                # Don't wait for marks in streaming mode - end call soon after final TTS
                 self.pending_end_call = True
                 if self._end_call_task and not self._end_call_task.done():
                     self._end_call_task.cancel()
-                self._end_call_task = asyncio.create_task(self._end_call_timeout())
+                # Shorter timeout - just enough for TTS to send final audio
+                self._end_call_task = asyncio.create_task(self._end_call_timeout(timeout_seconds=2))
 
         except Exception as e:
             print(f"❌ LLM processing error: {e}")
             # Fallback: speak an error message
             await self.speak("Sorry, I'm having trouble right now. Can you say that again?")
 
-    def _should_end_call(self, user_text: str, ai_response: str) -> bool:
+    def _should_end_call(self, user_text: str, ai_response: str, booking_created: bool = None) -> bool:
         """
         Detect if the conversation should end.
 
+        Args:
+            user_text: User's most recent input
+            ai_response: AI's most recent response
+            booking_created: Whether a booking was just created (from local var)
+
         Triggers on:
-        - User says goodbye/thanks after booking confirmed
+        - User says goodbye/thanks (especially after booking)
         - AI response contains "Goodbye" or similar farewell
         """
+        # Use passed parameter if provided (has fresher state), otherwise use instance var
+        booking_state = booking_created if booking_created is not None else self.booking_created
+        
         user_lower = user_text.lower()
         ai_lower = ai_response.lower()
 
-        # User farewell signals
+        # User farewell signals - strong indicators to end call
         user_farewell = any(word in user_lower for word in [
             "thank you", "thanks", "bye", "goodbye", "that's all",
-            "that's it", "cheers", "ta", "see you", "have a good"
+            "that's it", "cheers", "ta", "see you", "have a good",
+            "thanks for", "appreciate"
         ])
 
         # AI farewell signals (end of conversation)
         ai_farewell = any(word in ai_lower for word in [
-            "goodbye", "bye!", "see you", "take care", "all sorted"
+            "goodbye", "bye!", "see you", "take care", "all sorted",
+            "thank you for calling", "have a great", "thanks for calling",
+            "you're all set", "appointment is confirmed"
         ])
 
-        # End if either side clearly says goodbye/thanks
-        if ai_farewell:
-            print("📞 Call ending detected (AI farewell)")
-            return True
+        # DECISION LOGIC:
+        # 1. User says goodbye - always end (most reliable signal)
         if user_farewell:
-            print("📞 Call ending detected (User farewell)")
+            print(f"📞 Call ending detected (User farewell): '{user_text}'")
+            return True
+        
+        # 2. AI farewell after booking confirmed
+        if ai_farewell and booking_state:
+            print(f"📞 Call ending detected (AI farewell after booking): '{ai_response}'")
             return True
 
         return False
@@ -586,7 +629,7 @@ class CallSession:
         except Exception as e:
             print(f"❌ Error updating call record: {e}")
 
-    async def _end_call_timeout(self, timeout_seconds: int = 2) -> None:
+    async def _end_call_timeout(self, timeout_seconds: int = 6) -> None:
         """Fail-safe: end the call if the mark never arrives."""
         try:
             await asyncio.sleep(timeout_seconds)
@@ -614,6 +657,7 @@ class CallSession:
                     "ai_config": business.ai_config or {},
                     "services": business.services or [],
                     "working_hours": business.working_hours or {},
+                    "twilio_number": business.twilio_number,
                     "policies_summary": self._format_policies_summary(policies),
                     "faqs_summary": self._format_faqs_summary(faqs),
                 }
@@ -639,12 +683,15 @@ class CallSession:
         self.tool_context[tool_name] = result
         return result
 
-    async def _maybe_create_booking(self, ai_response_text: str) -> None:
+    async def _maybe_create_booking(self, ai_response_text: str, user_text: str | None = None) -> dict:
         """Create a booking if conversation indicates completion and data is sufficient."""
         if self.booking_created:
-            return
+            return {"created": True, "confirmation_text": None}
         if not self.call_id:
-            return
+            return {"created": False, "confirmation_text": None}
+        if not self._user_confirms_booking(user_text or ""):
+            print("🔎 Booking blocked: waiting_for_user_confirmation")
+            return {"created": False, "confirmation_text": None}
 
         service = self._extract_service_from_history()
         collected = {"service": service} if service else {}
@@ -655,11 +702,21 @@ class CallSession:
         customer_name = self._extract_name(self.conversation_history)
         customer_phone = self.caller_phone or ""
         if customer_name == "Customer" or not customer_phone:
-            return
+            print(
+                "🔎 Booking blocked: missing_name_or_phone "
+                f"name={'ok' if customer_name != 'Customer' else 'missing'} "
+                f"phone={'ok' if customer_phone else 'missing'}"
+            )
+            return {"created": False, "confirmation_text": None}
 
         has_datetime = requested_dt is not None
         if not (service and has_datetime):
-            return
+            print(
+                "🔎 Booking blocked: missing_service_or_datetime "
+                f"service={'ok' if service else 'missing'} "
+                f"datetime={'ok' if has_datetime else 'missing'}"
+            )
+            return {"created": False, "confirmation_text": None}
 
         provider_config = get_provider_config(self.business_config.get("ai_config"))
         provider = resolve_provider(provider_config)
@@ -677,11 +734,13 @@ class CallSession:
 
         availability = await provider.check_availability(context)
         if not availability.available:
-            return
+            print("🔎 Booking blocked: provider_unavailable")
+            return {"created": False, "confirmation_text": None}
 
         intent = await provider.create_booking(context)
         if intent.status == "declined":
-            return
+            print("🔎 Booking blocked: provider_declined")
+            return {"created": False, "confirmation_text": None}
 
         booking_datetime = requested_dt or self._local_now()
         internal_notes = None
@@ -704,6 +763,7 @@ class CallSession:
             })
 
         self.booking_created = True
+        self.awaiting_final_confirmation = False
 
         try:
             booking_date = booking_datetime.strftime("%A %d %b %Y at %I:%M %p")
@@ -713,11 +773,73 @@ class CallSession:
             )
             if intent.message_override:
                 sms_message = intent.message_override
-            twilio_client.send_sms(customer_phone, sms_message)
+            twilio_client.send_sms(
+                customer_phone,
+                sms_message,
+                from_=self.business_config.get("twilio_number")
+            )
         except Exception as e:
             print(f"❌ ERROR sending SMS: {e}")
 
         print(f"✅ BOOKING CREATED: {booking.id} ({customer_name}, {service})")
+        confirmation_text = (
+            f"Your appointment is confirmed for {booking_date}. "
+            f"You'll receive a confirmation message shortly."
+        )
+        return {"created": True, "confirmation_text": confirmation_text}
+
+    def _response_sounds_confirmed(self, text: str) -> bool:
+        if not text:
+            return False
+        lower = text.lower()
+        confirmation_signals = [
+            "confirmed", "all set", "you're all set", "appointment is set",
+            "booked", "i've booked", "i have booked", "reserved",
+            "your appointment is confirmed", "your booking is confirmed",
+        ]
+        return any(signal in lower for signal in confirmation_signals)
+
+    def _user_confirms_booking(self, text: str) -> bool:
+        if not text:
+            return False
+        lower = text.lower()
+        confirmation_signals = [
+            "yes", "yep", "yeah", "correct", "that's correct", "that is correct",
+            "right", "sounds good", "that's fine", "that works", "please book",
+            "go ahead", "book it", "confirm", "please confirm", "sure",
+        ]
+        return any(signal in lower for signal in confirmation_signals)
+
+    def _response_requests_finalization(self, text: str) -> bool:
+        if not text:
+            return False
+        lower = text.lower()
+        finalization_signals = [
+            "shall i go ahead", "go ahead and finalise", "finalize",
+            "finalise", "confirm that booking", "go ahead and book",
+            "should i book", "should i confirm", "can i confirm",
+            "want me to book", "want me to confirm", "ready to book",
+        ]
+        return any(signal in lower for signal in finalization_signals)
+
+    def _get_missing_booking_prompt(self, ai_response_text: str) -> str:
+        service = self._extract_service_from_history()
+        requested_dt = self._extract_datetime_from_history(self.conversation_history)
+        if requested_dt is None and ai_response_text:
+            requested_dt = self._extract_datetime_from_text(ai_response_text)
+        customer_name = self._extract_name(self.conversation_history)
+        customer_phone = self.caller_phone or ""
+
+        if not service:
+            return "Before I can confirm, what service do you need?"
+        if not requested_dt:
+            return "Before I can confirm, what day and time works best?"
+        if customer_name == "Customer" or not customer_name:
+            return "Before I can confirm, could I grab your name?"
+        if not customer_phone:
+            return "Before I can confirm, what's the best mobile number for confirmation?"
+
+        return "I couldn't confirm that just yet. What time would work instead?"
 
     def _is_booking_complete(self, collected_data: dict, history: list, ai_response_text: str = "") -> bool:
         completion_signals = [
@@ -748,6 +870,10 @@ class CallSession:
         )
         return False
 
+    def _clean_name_token(self, token: str) -> str:
+        cleaned = "".join(ch for ch in token if ch.isalpha())
+        return cleaned.capitalize() if cleaned else ""
+
     def _extract_name(self, history: list) -> str:
         for msg in reversed(history):
             if msg.get("role") == "user":
@@ -755,21 +881,31 @@ class CallSession:
                 content_lower = content.lower()
                 if "my name is" in content_lower:
                     name = content_lower.split("my name is")[-1].strip()
-                    return name.split()[0].capitalize() if name else "Customer"
+                    token = name.split()[0] if name else ""
+                    cleaned = self._clean_name_token(token)
+                    return cleaned if cleaned else "Customer"
                 if "i'm" in content_lower or "i am" in content_lower:
                     cleaned = content_lower.replace("i'm", "").replace("i am", "").strip()
                     words = cleaned.split()
                     if words:
-                        return words[0].capitalize()
+                        cleaned_name = self._clean_name_token(words[0])
+                        if cleaned_name:
+                            return cleaned_name
                 if "this is" in content_lower:
                     name = content_lower.split("this is")[-1].strip()
-                    return name.split()[0].capitalize() if name else "Customer"
+                    token = name.split()[0] if name else ""
+                    cleaned = self._clean_name_token(token)
+                    return cleaned if cleaned else "Customer"
                 if " and my" in content_lower:
                     name = content_lower.split(" and my")[0].strip()
-                    return name.split()[0].capitalize() if name else "Customer"
+                    token = name.split()[0] if name else ""
+                    cleaned = self._clean_name_token(token)
+                    return cleaned if cleaned else "Customer"
                 words = [w for w in content.split() if w.isalpha()]
                 if words and len(words) <= 2 and not any(ch.isdigit() for ch in content):
-                    return words[0].capitalize()
+                    cleaned_name = self._clean_name_token(words[0])
+                    if cleaned_name:
+                        return cleaned_name
         return "Customer"
 
     def _extract_datetime_from_history(self, history: list) -> datetime | None:
@@ -783,7 +919,7 @@ class CallSession:
             "sunday": 6,
         }
 
-        time_pattern = re.compile(r"(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?", re.IGNORECASE)
+        time_pattern = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
 
         for msg in reversed(history):
             if msg.get("role") != "user":
@@ -843,7 +979,7 @@ class CallSession:
             "saturday": 5,
             "sunday": 6,
         }
-        time_pattern = re.compile(r"(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?", re.IGNORECASE)
+        time_pattern = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
         day = None
         for name, idx in weekdays.items():
             if name in content_lower:
@@ -971,6 +1107,8 @@ class CallSession:
         Handle end of user utterance (VAD detected silence).
 
         This is the RIGHT time to process - user has actually stopped speaking.
+        Uses debouncing to prevent multiple rapid UtteranceEnd events from
+        triggering multiple concurrent LLM calls (FIX #2).
         """
         self.is_user_speaking = False
 
@@ -978,7 +1116,7 @@ class CallSession:
             full_utterance = self.current_transcript.strip()
             self.current_transcript = ""  # Clear for next utterance
 
-            print(f"🛑 Utterance complete: {full_utterance}")
+            print(f"🛑 Utterance detected: {full_utterance}")
 
             self.metrics.total_user_utterances += 1
 
@@ -988,14 +1126,55 @@ class CallSession:
                 "content": full_utterance,
             })
 
-            # NOW process with LLM (user has finished speaking)
-            asyncio.create_task(self._process_with_llm(full_utterance))
+            # Debounce: Cancel pending debounce task and create a new one
+            # This ensures we only process once even if UtteranceEnd fires multiple times
+            if self._utterance_debounce_task and not self._utterance_debounce_task.done():
+                self._utterance_debounce_task.cancel()
+                try:
+                    await self._utterance_debounce_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Schedule processing with 500ms grace period
+            # If another UtteranceEnd arrives before this, it cancels this task
+            self._utterance_debounce_task = asyncio.create_task(
+                self._debounced_process_utterance(full_utterance)
+            )
         else:
             print(f"🛑 Utterance end (no transcript)")
+
+    async def _debounced_process_utterance(self, utterance: str) -> None:
+        """
+        Process utterance after grace period, ensuring only one LLM call at a time.
+        
+        Args:
+            utterance: The user's spoken text
+        """
+        try:
+            # Grace period: wait 500ms to see if user speaks again
+            # This prevents processing incomplete thoughts
+            await asyncio.sleep(0.5)
+
+            # Acquire lock to ensure only one LLM processing happens at a time (FIX #1)
+            async with self._processing_lock:
+                print(f"🤖 Processing utterance (after debounce grace period): {utterance[:50]}...")
+                await self._process_with_llm(utterance)
+
+        except asyncio.CancelledError:
+            print(f"🛑 Utterance debounce cancelled (user spoke again)")
+            pass
+        except Exception as e:
+            print(f"❌ Error in debounced utterance processing: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def _on_speech_started(self) -> None:
         """Handle start of user speech."""
         self.is_user_speaking = True
+        if self.pending_end_call:
+            self.pending_end_call = False
+            if self._end_call_task and not self._end_call_task.done():
+                self._end_call_task.cancel()
 
         # Barge-in: If AI is speaking and user starts talking, clear buffer
         if self.is_ai_speaking:

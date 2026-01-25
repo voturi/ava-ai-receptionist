@@ -12,11 +12,14 @@ class TwilioClient:
         self.phone_number = os.getenv("TWILIO_PHONE_NUMBER")
         self.client = Client(self.account_sid, self.auth_token)
 
-    def send_sms(self, to:str, message:str):
+    def send_sms(self, to: str, message: str, from_: str | None = None):
         """Send an SMS to the specified phone number"""
+        from_number = from_ or self.phone_number
+        if not from_number:
+            raise ValueError("Missing Twilio from number for SMS.")
         message = self.client.messages.create(
             to=to,
-            from_=self.phone_number,
+            from_=from_number,
             body=message
         )
         return message
