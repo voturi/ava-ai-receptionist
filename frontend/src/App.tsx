@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { StatCard } from './components/dashboard/StatCard';
 import CallCard from './components/dashboard/CallCard';
 import { SettingsPage } from './pages/Settings';
+import { GoogleCalendarCallbackPage } from './pages/GoogleCalendarCallback';
 import { api, type Call, type Stats } from './lib/api';
 
 // Hardcode business ID for now
@@ -17,6 +18,12 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [activeCall, setActiveCall] = useState<Call | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  
+  // Check if we're on the Google Calendar callback page
+  const isGoogleCalendarCallback = window.location.pathname === '/auth/google-calendar/callback';
+  if (isGoogleCalendarCallback) {
+    return <GoogleCalendarCallbackPage />;
+  }
 
   useEffect(() => {
     loadData();

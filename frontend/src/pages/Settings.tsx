@@ -20,23 +20,40 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       name: 'Google Calendar',
       icon: <Mail className="w-5 h-5" />,
       connected: false,
-      oauthStartUrl: `/api/v1/auth/google-calendar/start?business_id=${BUSINESS_ID}`,
-      disconnectEndpoint: `/api/v1/settings/${BUSINESS_ID}/calendar/disconnect?provider=google`,
+      oauthStartUrl: `/api/v1/auth/google-calendar/start`,
+      disconnectEndpoint: `/api/v1/auth/google-calendar/disconnect`,
     },
     {
       name: 'Calendly',
       icon: <Calendar className="w-5 h-5" />,
       connected: false,
-      oauthStartUrl: `/api/v1/auth/calendly/start?business_id=${BUSINESS_ID}`,
-      disconnectEndpoint: `/api/v1/settings/${BUSINESS_ID}/calendar/disconnect?provider=calendly`,
+      oauthStartUrl: `/api/v1/auth/calendly/start`,
+      disconnectEndpoint: `/api/v1/auth/calendly/disconnect`,
     },
   ]);
 
-  const handleConnect = (providerName: string) => {
+  const handleConnect = async (providerName: string) => {
     const connection = connections.find((c) => c.name === providerName);
-    if (connection) {
-      // Redirect to OAuth flow
-      window.location.href = `${API_BASE}${connection.oauthStartUrl}`;
+    if (!connection) return;
+
+    try {
+      // Get the authorization URL from backend
+      const response = await fetch(`${API_BASE}${connection.oauthStartUrl}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ business_id: BUSINESS_ID }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        // Redirect to Google's OAuth consent screen
+        window.location.href = data.authorization_url;
+      } else {
+        alert('Failed to initiate OAuth flow');
+      }
+    } catch (error) {
+      console.error('OAuth initiation error:', error);
+      alert('Error connecting calendar');
     }
   };
 
@@ -47,6 +64,8 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
     try {
       const response = await fetch(`${API_BASE}${connection.disconnectEndpoint}`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ business_id: BUSINESS_ID }),
       });
 
       if (response.ok) {
