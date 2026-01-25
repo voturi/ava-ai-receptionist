@@ -1,21 +1,19 @@
 import { useEffect, useState } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
 import { CheckCircle, AlertCircle, Loader } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export function GoogleCalendarCallbackPage() {
-  const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [message, setMessage] = useState('');
 
   useEffect(() => {
     const handleCallback = async () => {
       try {
-        const code = searchParams.get('code');
-        const state = searchParams.get('state');
-        const error = searchParams.get('error');
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        const state = params.get('state');
+        const error = params.get('error');
 
         if (error) {
           setStatus('error');
@@ -40,9 +38,9 @@ export function GoogleCalendarCallbackPage() {
         if (response.ok) {
           setStatus('success');
           setMessage('Google Calendar connected successfully!');
-          // Redirect to settings page after 2 seconds
+          // Redirect to dashboard after 2 seconds
           setTimeout(() => {
-            navigate('/dashboard');
+            window.location.href = '/';
           }, 2000);
         } else {
           setStatus('error');
@@ -56,7 +54,7 @@ export function GoogleCalendarCallbackPage() {
     };
 
     handleCallback();
-  }, [searchParams, navigate]);
+  }, []);
 
   return (
     <div className="min-h-screen bg-black flex items-center justify-center p-6">
