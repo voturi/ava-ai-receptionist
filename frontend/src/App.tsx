@@ -3,6 +3,7 @@ import { Phone, Calendar, TrendingUp, Clock } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { StatCard } from './components/dashboard/StatCard';
 import CallCard from './components/dashboard/CallCard';
+import { SettingsPage } from './pages/Settings';
 import { api, type Call, type Stats } from './lib/api';
 
 // Hardcode business ID for now
@@ -15,6 +16,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeCall, setActiveCall] = useState<Call | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -98,6 +100,10 @@ function App() {
     );
   }
 
+  if (showSettings) {
+    return <SettingsPage onBack={() => setShowSettings(false)} />;
+  }
+
   return (
     <div className="min-h-screen bg-black p-6">
       {/* Background orbs */}
@@ -127,7 +133,10 @@ function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="px-4 py-2 glass glass-hover rounded-xl text-white/80 text-sm font-medium transition-all">
+            <button
+              onClick={() => setShowSettings(true)}
+              className="px-4 py-2 glass glass-hover rounded-xl text-white/80 text-sm font-medium transition-all"
+            >
               Settings
             </button>
             <button className="px-6 py-2 bg-gradient-to-r from-cyan-400 to-cyan-600 rounded-xl text-white font-semibold hover:shadow-[0_0_30px_rgba(0,217,255,0.45)] animate-glow-breathe transition-all duration-300 transform hover:-translate-y-0.5">
