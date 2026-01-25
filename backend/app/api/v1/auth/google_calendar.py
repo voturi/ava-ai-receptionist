@@ -6,9 +6,10 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-from app.db import get_db
+from app.core.database import get_db
 from app.models import Business
 from app.integrations.google_calendar.oauth import google_oauth
 
@@ -33,7 +34,7 @@ class GoogleCalendarAuthSuccess(BaseModel):
 @router.post("/start", response_model=GoogleCalendarStartResponse)
 async def start_oauth_flow(
     request: GoogleCalendarStartRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> GoogleCalendarStartResponse:
     """
     Initiate Google Calendar OAuth flow
@@ -41,9 +42,8 @@ async def start_oauth_flow(
     Returns authorization URL for user to visit
     """
     # Verify business exists
-    business = db.query(Business).filter(
-        Business.id == request.business_id,
-    ).first()
+    result = await db.execute(select(Business).where(Business.id == request.business_id))
+    business = result.scalar_one_or_none()
     
     if not business:
         raise HTTPException(status_code=403, detail="Business not found")
@@ -61,7 +61,7 @@ async def start_oauth_flow(
 async def oauth_callback(
     code: str = Query(...),
     state: str = Query(...),  # business_id passed as state
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> GoogleCalendarAuthSuccess:
     """
     Google OAuth callback endpoint
@@ -71,7 +71,8 @@ async def oauth_callback(
     business_id = state
     
     # Verify business exists
-    business = db.query(Business).filter(Business.id == business_id).first()
+    result = await db.execute(select(Business).where(Business.id == business_id))
+    business = result.scalar_one_or_none()
     if not business:
         logger.error(f"Business {business_id} not found during OAuth callback")
         raise HTTPException(status_code=404, detail="Business not found")
@@ -96,7 +97,7 @@ async def oauth_callback(
         business.google_token_expires_at = expires_at
         
         db.add(business)
-        db.commit()
+        await db.commit()
         
         logger.info(f"Successfully saved Google Calendar credentials for business {business_id}")
         
@@ -108,7 +109,7 @@ async def oauth_callback(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logger.error(f"OAuth callback error for business {business_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to process OAuth callback")
 
@@ -120,7 +121,7 @@ class DisconnectRequest(BaseModel):
 @router.post("/disconnect")
 async def disconnect_google_calendar(
     request: DisconnectRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> GoogleCalendarAuthSuccess:
     """
     Disconnect Google Calendar from business
@@ -128,9 +129,8 @@ async def disconnect_google_calendar(
     Clears all stored credentials
     """
     # Verify business exists
-    business = db.query(Business).filter(
-        Business.id == request.business_id,
-    ).first()
+    result = await db.execute(select(Business).where(Business.id == request.business_id))
+    business = result.scalar_one_or_none()
     
     if not business:
         raise HTTPException(status_code=403, detail="Business not found")
@@ -142,7 +142,7 @@ async def disconnect_google_calendar(
         business.google_token_expires_at = None
         
         db.add(business)
-        db.commit()
+        await db.commit()
         
         logger.info(f"Disconnected Google Calendar for business {request.business_id}")
         
@@ -152,6 +152,6 @@ async def disconnect_google_calendar(
         )
         
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logger.error(f"Failed to disconnect Google Calendar for business {request.business_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to disconnect Google Calendar")
