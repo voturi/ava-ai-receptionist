@@ -24,6 +24,8 @@ from zoneinfo import ZoneInfo
 from app.integrations.stt import DeepgramStreamingSTT
 from app.integrations.stt.deepgram_streaming import TranscriptResult, STTConfig
 from app.integrations.tts import DeepgramStreamingTTS, TTSConfig
+from app.services import booking_logic
+from app.services.conversation_engine import ConversationEngine, ConversationEngineConfig
 from app.services.streaming_ai_service import streaming_ai_service
 from app.integrations.twilio_client import twilio_client
 from app.integrations.providers.registry import resolve_provider, get_provider_config
@@ -35,6 +37,24 @@ from app.tools.tool_definitions import TOOLS
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
+
+
+@dataclass
+class BookingState:
+    """Structured state for a potential booking in this call.
+
+    This will be populated progressively by workflows and helpers as
+    we refactor booking logic away from ad-hoc extraction. For now it
+    is introduced as a placeholder and does not change behaviour.
+    """
+
+    service: Optional[str] = None
+    when: Optional[datetime] = None
+    address: Optional[str] = None
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    confirmed: bool = False
+    booking_id: Optional[str] = None
 
 
 @dataclass
@@ -113,6 +133,13 @@ class CallSession:
     collected_data: dict = field(default_factory=dict)
     current_transcript: str = ""
     booking_created: bool = False
+    # Structured booking state (fields will be populated as we
+    # refactor workflows). Currently not relied on for behaviour.
+    booking_state: BookingState = field(default_factory=BookingState)
+    # Last per-utterance intent from the detector
+    last_intent: Optional[str] = None
+    # Sticky primary intent/workflow for the call (e.g. "booking")
+    primary_intent: Optional[str] = None
 
     # Speaking state
     is_user_speaking: bool = False
@@ -416,118 +443,9 @@ class CallSession:
         })
 
     async def _process_with_llm(self, user_text: str) -> None:
-        """
-        Process user input with streaming LLM → TTS pipeline.
-
-        This is the core of the streaming architecture:
-        1. User text comes in from STT
-        2. Stream to OpenAI for response
-        3. As tokens arrive, immediately send to TTS
-        4. TTS streams audio back to Twilio
-
-        Result: <800ms to first audio byte
-        """
-        if not self.tts_connection or not self.tts_connection.is_connected:
-            print("⚠️ TTS not connected, skipping LLM processing")
-            return
-
-        print(f"🤖 Processing with LLM: {user_text[:50]}...")
-
-        # Track timing
-        llm_start = datetime.utcnow()
-        first_token_received = False
-        full_response = ""
-
-        try:
-            prefetched_tools = await self._prefetch_tools(user_text)
-
-            # Stream LLM response with tools (mid-stream tool calling)
-            buffer = ""
-            async for event in streaming_ai_service.stream_with_tools(
-                user_message=user_text,
-                conversation_history=self.conversation_history[:-1],
-                business_profile=self._get_business_profile(),
-                tools=TOOLS,
-                tool_executor=self._execute_tool,
-                max_tool_calls=2,
-                prefetched_tools=prefetched_tools,
-            ):
-                if event.get("type") == "tool_call":
-                    self.tool_history.append(event)
-                    continue
-
-                chunk = event.get("text", "")
-                if not chunk:
-                    continue
-
-                # Track first token timing
-                if not first_token_received:
-                    first_token_received = True
-                    llm_latency = (datetime.utcnow() - llm_start).total_seconds() * 1000
-                    print(f"⚡ LLM first token: {llm_latency:.0f}ms")
-
-                full_response += chunk
-                buffer += chunk
-
-                if streaming_ai_service._should_yield(buffer, min_size=10):
-                    await self.tts_connection.send_text(buffer)
-                    buffer = ""
-
-            if buffer:
-                await self.tts_connection.send_text(buffer)
-
-            # Signal end of text to TTS
-            await self.tts_connection.flush()
-
-            # Add AI response to conversation history
-            if full_response:
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": full_response,
-                })
-
-            total_latency = (datetime.utcnow() - llm_start).total_seconds() * 1000
-            print(f"🤖 AI Response ({total_latency:.0f}ms): {full_response}")
-
-            # Attempt booking creation only after we explicitly asked to finalize
-            booking_result = {"created": False, "confirmation_text": None}
-            asks_finalization = self._response_requests_finalization(full_response)
-            if asks_finalization:
-                self.awaiting_final_confirmation = True
-            if self.awaiting_final_confirmation and self._user_confirms_booking(user_text):
-                booking_result = await self._maybe_create_booking(full_response, user_text=user_text)
-            booking_created = booking_result.get("created", False)
-            confirmation_text = booking_result.get("confirmation_text")
-
-            # Update call record with transcript
-            await self._update_call_record()
-
-            # If AI sounded like it confirmed but booking was not created, correct course
-            if (
-                not booking_created
-                and not asks_finalization
-                and self._response_sounds_confirmed(full_response)
-                and self._user_confirms_booking(user_text)
-            ):
-                await self.speak(self._get_missing_booking_prompt(full_response))
-            if booking_created and confirmation_text and not self._response_sounds_confirmed(full_response):
-                await self.speak(confirmation_text)
-
-            # Check if we should end the call
-            # Note: Pass booking_created state directly to handle timing issue
-            if self._should_end_call(user_text, full_response, booking_created):
-                print(f"📞 Scheduling call end after TTS completes...")
-                # Don't wait for marks in streaming mode - end call soon after final TTS
-                self.pending_end_call = True
-                if self._end_call_task and not self._end_call_task.done():
-                    self._end_call_task.cancel()
-                # Shorter timeout - just enough for TTS to send final audio
-                self._end_call_task = asyncio.create_task(self._end_call_timeout(timeout_seconds=2))
-
-        except Exception as e:
-            print(f"❌ LLM processing error: {e}")
-            # Fallback: speak an error message
-            await self.speak("Sorry, I'm having trouble right now. Can you say that again?")
+        """Delegate LLM + tools + booking flow to ConversationEngine."""
+        engine = ConversationEngine(ConversationEngineConfig(session=self))
+        await engine.process_utterance(user_text)
 
     def _should_end_call(self, user_text: str, ai_response: str, booking_created: bool = None) -> bool:
         """
@@ -684,365 +602,27 @@ class CallSession:
         return result
 
     async def _maybe_create_booking(self, ai_response_text: str, user_text: str | None = None) -> dict:
-        """Create a booking if conversation indicates completion and data is sufficient."""
-        if self.booking_created:
-            return {"created": True, "confirmation_text": None}
-        if not self.call_id:
-            return {"created": False, "confirmation_text": None}
-        if not self._user_confirms_booking(user_text or ""):
-            print("🔎 Booking blocked: waiting_for_user_confirmation")
-            return {"created": False, "confirmation_text": None}
+        """Create a booking if conversation indicates completion and data is sufficient.
 
-        service = self._extract_service_from_history()
-        collected = {"service": service} if service else {}
-
-        requested_dt = self._extract_datetime_from_history(self.conversation_history)
-        if requested_dt is None and ai_response_text:
-            requested_dt = self._extract_datetime_from_text(ai_response_text)
-        customer_name = self._extract_name(self.conversation_history)
-        customer_phone = self.caller_phone or ""
-        if customer_name == "Customer" or not customer_phone:
-            print(
-                "🔎 Booking blocked: missing_name_or_phone "
-                f"name={'ok' if customer_name != 'Customer' else 'missing'} "
-                f"phone={'ok' if customer_phone else 'missing'}"
-            )
-            return {"created": False, "confirmation_text": None}
-
-        has_datetime = requested_dt is not None
-        if not (service and has_datetime):
-            print(
-                "🔎 Booking blocked: missing_service_or_datetime "
-                f"service={'ok' if service else 'missing'} "
-                f"datetime={'ok' if has_datetime else 'missing'}"
-            )
-            return {"created": False, "confirmation_text": None}
-
-        provider_config = get_provider_config(self.business_config.get("ai_config"))
-        provider = resolve_provider(provider_config)
-        context = BookingContext(
+        Delegates to app.services.booking_logic.maybe_create_booking to keep
+        booking logic centralized and testable.
+        """
+        ctx = booking_logic.BookingCreationContext(
             business_id=self.business_id,
             business_name=self.business_name,
-            service=service or "General",
-            requested_datetime=requested_dt,
-            customer=CustomerInfo(
-                name=customer_name,
-                phone=customer_phone,
-            ),
-            metadata=provider_config,
+            business_config=self.business_config,
+            caller_phone=self.caller_phone,
+            call_id=self.call_id,
+            conversation_history=self.conversation_history,
+            preselected_service=self.booking_state.service,
+        )
+        return await booking_logic.maybe_create_booking(
+            ctx=ctx,
+            ai_response_text=ai_response_text,
+            user_text=user_text,
+            booking_already_created=self.booking_created,
         )
 
-        availability = await provider.check_availability(context)
-        if not availability.available:
-            print("🔎 Booking blocked: provider_unavailable")
-            return {"created": False, "confirmation_text": None}
-
-        intent = await provider.create_booking(context)
-        if intent.status == "declined":
-            print("🔎 Booking blocked: provider_declined")
-            return {"created": False, "confirmation_text": None}
-
-        booking_datetime = requested_dt or self._local_now()
-        internal_notes = None
-        if intent.external_reference:
-            internal_notes = f"Provider reference: {intent.external_reference}"
-
-        async with AsyncSessionLocal() as session:
-            db_service = DBService(session)
-            booking = await db_service.create_booking({
-                "business_id": self.business_id,
-                "call_id": self.call_id,
-                "customer_name": customer_name,
-                "customer_phone": customer_phone,
-                "service": service or "General",
-                "booking_datetime": booking_datetime,
-                "status": intent.status,
-                "confirmed_at": datetime.utcnow() if intent.status == "confirmed" else None,
-                "internal_notes": internal_notes,
-                "customer_notes": self._extract_issue_summary(),
-            })
-
-        self.booking_created = True
-        self.awaiting_final_confirmation = False
-
-        try:
-            booking_date = booking_datetime.strftime("%A %d %b %Y at %I:%M %p")
-            sms_message = (
-                f"Hi {customer_name}! Your {service or 'service'} appointment at "
-                f"{self.business_name} is confirmed for {booking_date}."
-            )
-            if intent.message_override:
-                sms_message = intent.message_override
-            twilio_client.send_sms(
-                customer_phone,
-                sms_message,
-                from_=self.business_config.get("twilio_number")
-            )
-        except Exception as e:
-            print(f"❌ ERROR sending SMS: {e}")
-
-        print(f"✅ BOOKING CREATED: {booking.id} ({customer_name}, {service})")
-        confirmation_text = (
-            f"Your appointment is confirmed for {booking_date}. "
-            f"You'll receive a confirmation message shortly."
-        )
-        return {"created": True, "confirmation_text": confirmation_text}
-
-    def _response_sounds_confirmed(self, text: str) -> bool:
-        if not text:
-            return False
-        lower = text.lower()
-        confirmation_signals = [
-            "confirmed", "all set", "you're all set", "appointment is set",
-            "booked", "i've booked", "i have booked", "reserved",
-            "your appointment is confirmed", "your booking is confirmed",
-        ]
-        return any(signal in lower for signal in confirmation_signals)
-
-    def _user_confirms_booking(self, text: str) -> bool:
-        if not text:
-            return False
-        lower = text.lower()
-        confirmation_signals = [
-            "yes", "yep", "yeah", "correct", "that's correct", "that is correct",
-            "right", "sounds good", "that's fine", "that works", "please book",
-            "go ahead", "book it", "confirm", "please confirm", "sure",
-        ]
-        return any(signal in lower for signal in confirmation_signals)
-
-    def _response_requests_finalization(self, text: str) -> bool:
-        if not text:
-            return False
-        lower = text.lower()
-        finalization_signals = [
-            "shall i go ahead", "go ahead and finalise", "finalize",
-            "finalise", "confirm that booking", "go ahead and book",
-            "should i book", "should i confirm", "can i confirm",
-            "want me to book", "want me to confirm", "ready to book",
-        ]
-        return any(signal in lower for signal in finalization_signals)
-
-    def _get_missing_booking_prompt(self, ai_response_text: str) -> str:
-        service = self._extract_service_from_history()
-        requested_dt = self._extract_datetime_from_history(self.conversation_history)
-        if requested_dt is None and ai_response_text:
-            requested_dt = self._extract_datetime_from_text(ai_response_text)
-        customer_name = self._extract_name(self.conversation_history)
-        customer_phone = self.caller_phone or ""
-
-        if not service:
-            return "Before I can confirm, what service do you need?"
-        if not requested_dt:
-            return "Before I can confirm, what day and time works best?"
-        if customer_name == "Customer" or not customer_name:
-            return "Before I can confirm, could I grab your name?"
-        if not customer_phone:
-            return "Before I can confirm, what's the best mobile number for confirmation?"
-
-        return "I couldn't confirm that just yet. What time would work instead?"
-
-    def _is_booking_complete(self, collected_data: dict, history: list, ai_response_text: str = "") -> bool:
-        completion_signals = [
-            "all set", "i'll sms you", "i will sms", "sms you soon",
-            "confirmed", "booked", "appointment is set", "you're all set",
-            "everything is confirmed", "i'll book", "i will book",
-            "i'll schedule", "i will schedule", "thanks for confirming"
-        ]
-        ai_text_lower = ai_response_text.lower()
-        has_completion_signal = any(signal in ai_text_lower for signal in completion_signals)
-        if not has_completion_signal:
-            return False
-
-        has_service = "service" in collected_data and collected_data["service"]
-        has_name = self._extract_name(history) != "Customer"
-        has_phone = bool(self.caller_phone)
-        has_datetime = (
-            self._extract_datetime_from_history(history) is not None
-            or self._extract_datetime_from_text(ai_response_text) is not None
-        )
-
-        if has_service and has_name and has_phone and has_datetime:
-            return True
-
-        print(
-            f"🔎 Booking incomplete: service={has_service} name={has_name} "
-            f"phone={has_phone} datetime={has_datetime}"
-        )
-        return False
-
-    def _clean_name_token(self, token: str) -> str:
-        cleaned = "".join(ch for ch in token if ch.isalpha())
-        return cleaned.capitalize() if cleaned else ""
-
-    def _extract_name(self, history: list) -> str:
-        for msg in reversed(history):
-            if msg.get("role") == "user":
-                content = msg.get("content", "").strip()
-                content_lower = content.lower()
-                if "my name is" in content_lower:
-                    name = content_lower.split("my name is")[-1].strip()
-                    token = name.split()[0] if name else ""
-                    cleaned = self._clean_name_token(token)
-                    return cleaned if cleaned else "Customer"
-                if "i'm" in content_lower or "i am" in content_lower:
-                    cleaned = content_lower.replace("i'm", "").replace("i am", "").strip()
-                    words = cleaned.split()
-                    if words:
-                        cleaned_name = self._clean_name_token(words[0])
-                        if cleaned_name:
-                            return cleaned_name
-                if "this is" in content_lower:
-                    name = content_lower.split("this is")[-1].strip()
-                    token = name.split()[0] if name else ""
-                    cleaned = self._clean_name_token(token)
-                    return cleaned if cleaned else "Customer"
-                if " and my" in content_lower:
-                    name = content_lower.split(" and my")[0].strip()
-                    token = name.split()[0] if name else ""
-                    cleaned = self._clean_name_token(token)
-                    return cleaned if cleaned else "Customer"
-                words = [w for w in content.split() if w.isalpha()]
-                if words and len(words) <= 2 and not any(ch.isdigit() for ch in content):
-                    cleaned_name = self._clean_name_token(words[0])
-                    if cleaned_name:
-                        return cleaned_name
-        return "Customer"
-
-    def _extract_datetime_from_history(self, history: list) -> datetime | None:
-        weekdays = {
-            "monday": 0,
-            "tuesday": 1,
-            "wednesday": 2,
-            "thursday": 3,
-            "friday": 4,
-            "saturday": 5,
-            "sunday": 6,
-        }
-
-        time_pattern = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
-
-        for msg in reversed(history):
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content", "")
-            content_lower = content.lower()
-
-            day = None
-            for name, idx in weekdays.items():
-                if name in content_lower:
-                    day = idx
-                    break
-
-            time_match = time_pattern.search(content_lower)
-            if day is None and not time_match:
-                continue
-
-            now = self._local_now()
-            target_date = now
-            if day is not None:
-                days_ahead = (day - now.weekday() + 7) % 7
-                if days_ahead == 0:
-                    days_ahead = 7
-                if "next week" in content_lower:
-                    days_ahead += 7
-                target_date = now + timedelta(days=days_ahead)
-
-            hour = 9
-            minute = 0
-            if time_match:
-                hour = int(time_match.group(1))
-                minute = int(time_match.group(2) or 0)
-                meridiem = (time_match.group(3) or "").lower()
-                if meridiem == "pm" and hour < 12:
-                    hour += 12
-                if meridiem == "am" and hour == 12:
-                    hour = 0
-            elif "afternoon" in content_lower or "arvo" in content_lower:
-                hour = 15
-            elif "morning" in content_lower:
-                hour = 10
-
-            return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-        return None
-
-    def _extract_datetime_from_text(self, text: str) -> datetime | None:
-        if not text:
-            return None
-        content_lower = text.lower()
-        weekdays = {
-            "monday": 0,
-            "tuesday": 1,
-            "wednesday": 2,
-            "thursday": 3,
-            "friday": 4,
-            "saturday": 5,
-            "sunday": 6,
-        }
-        time_pattern = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
-        day = None
-        for name, idx in weekdays.items():
-            if name in content_lower:
-                day = idx
-                break
-        time_match = time_pattern.search(content_lower)
-        if day is None and not time_match and "tomorrow" not in content_lower:
-            return None
-        now = self._local_now()
-        target_date = now
-        if "tomorrow" in content_lower:
-            target_date = now + timedelta(days=1)
-        elif day is not None:
-            days_ahead = (day - now.weekday() + 7) % 7
-            if days_ahead == 0:
-                days_ahead = 7
-            if "next week" in content_lower:
-                days_ahead += 7
-            target_date = now + timedelta(days=days_ahead)
-        hour = 9
-        minute = 0
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = int(time_match.group(2) or 0)
-            meridiem = (time_match.group(3) or "").lower()
-            if meridiem == "pm" and hour < 12:
-                hour += 12
-            if meridiem == "am" and hour == 12:
-                hour = 0
-        elif "afternoon" in content_lower or "arvo" in content_lower:
-            hour = 15
-        elif "morning" in content_lower:
-            hour = 10
-        return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-    def _local_now(self) -> datetime:
-        """Return current time in Australia/Sydney as naive local time."""
-        local = datetime.now(ZoneInfo("Australia/Sydney"))
-        return local.replace(tzinfo=None)
-
-    def _extract_service_from_history(self) -> Optional[str]:
-        services = self.business_config.get("services") or []
-        if not services:
-            return None
-        history_text = " ".join(
-            msg.get("content", "").lower() for msg in self.conversation_history
-        )
-        for service in services:
-            if isinstance(service, dict):
-                name = str(service.get("name", "")).lower()
-            else:
-                name = str(service).lower()
-            if name and name in history_text:
-                return str(service.get("name")) if isinstance(service, dict) else str(service)
-        return None
-
-    def _extract_issue_summary(self) -> Optional[str]:
-        """Return the most recent user utterance as issue summary."""
-        for msg in reversed(self.conversation_history):
-            if msg.get("role") == "user":
-                content = msg.get("content", "").strip()
-                return content[:500] if content else None
-        return None
 
     def _format_policies_summary(self, policies: list) -> str:
         if not policies:
@@ -1155,6 +735,13 @@ class CallSession:
             # This prevents processing incomplete thoughts
             await asyncio.sleep(0.5)
 
+            # If we've already scheduled the call to end, ignore any
+            # further utterances to avoid reopening the conversation
+            # after a clear goodbye / resolution.
+            if self.pending_end_call:
+                print("🛑 Ignoring utterance because call end is already scheduled")
+                return
+
             # Acquire lock to ensure only one LLM processing happens at a time (FIX #1)
             async with self._processing_lock:
                 print(f"🤖 Processing utterance (after debounce grace period): {utterance[:50]}...")
@@ -1171,10 +758,14 @@ class CallSession:
     async def _on_speech_started(self) -> None:
         """Handle start of user speech."""
         self.is_user_speaking = True
+
+        # If a call end has already been scheduled (after a goodbye or
+        # booking confirmation), do not cancel it. We deliberately ignore
+        # late speech here to avoid re-opening the conversation and
+        # creating a confusing UX.
         if self.pending_end_call:
-            self.pending_end_call = False
-            if self._end_call_task and not self._end_call_task.done():
-                self._end_call_task.cancel()
+            print("🛑 Speech detected after call end scheduled; ignoring")
+            return
 
         # Barge-in: If AI is speaking and user starts talking, clear buffer
         if self.is_ai_speaking:
