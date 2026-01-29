@@ -155,15 +155,15 @@ flowchart TD
 
 - **Event**: Conversation indicates a booking is complete.
 - **Components**:
-  - `CallSession._maybe_create_booking`.
-  - `booking_logic.maybe_create_booking`.
-  - `DBService.create_booking`.
-  - `twilio_client.send_sms`.
+-  - `BookingWorkflow.handle_turn`.
+-  - `booking_logic.maybe_create_booking`.
+-  - `DBService.create_booking`.
+-  - `twilio_client.send_sms`.
 - **What they do**:
-  - Evaluate whether sufficient data exists to create a booking.
-  - Create a booking record tied to the current call.
-  - Send a confirmation SMS to the customer.
-  - Update call outcome/intent in the database.
+-  - BookingWorkflow inspects the latest AI/user turns and decides when to attempt booking creation.
+-  - `booking_logic.maybe_create_booking` evaluates whether sufficient data exists and, if so, creates a booking via `DBService.create_booking`.
+-  - A confirmation SMS is sent to the customer using `twilio_client.send_sms`.
+-  - Call outcome/intent is updated in the database.
 
 ### 9. Deciding to End the Call
 

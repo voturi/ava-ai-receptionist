@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
+import os
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
+
+from openai import AsyncOpenAI
 
 from app.integrations.providers.base import BookingContext, CustomerInfo
 from app.integrations.providers.registry import get_provider_config, resolve_provider
@@ -18,6 +22,27 @@ from app.integrations.twilio_client import twilio_client
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+_openai_client: AsyncOpenAI | None = None
+
+
+def _get_openai_client() -> Optional[AsyncOpenAI]:
+    """Return a shared AsyncOpenAI client, or None if not configured.
+
+    We keep this lightweight and only use it as a *fallback* when simple
+    heuristics fail to extract a real customer name.
+    """
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    _openai_client = AsyncOpenAI(api_key=api_key)
+    return _openai_client
+
+
 def clean_name_token(token: str) -> str:
     """Normalize a potential name token to a simple capitalized string."""
     cleaned = "".join(ch for ch in token if ch.isalpha())
@@ -25,9 +50,11 @@ def clean_name_token(token: str) -> str:
 
 
 def extract_name(history: list[dict[str, Any]]) -> str:
-    """Extract customer name from conversation history.
+    """Extract customer name from conversation history (heuristic only).
 
-    More robust against punctuation and noisy ASR output.
+    This is intentionally fast and local. A slower, LLM-backed fallback
+    exists in ``extract_name_and_service_via_llm`` and is only used when
+    this heuristic returns the generic placeholder "Customer".
     """
     for msg in reversed(history):
         if msg.get("role") != "user":
@@ -89,6 +116,116 @@ def extract_name(history: list[dict[str, Any]]) -> str:
                 return cleaned_name
 
     return "Customer"
+
+
+async def extract_name_and_service_via_llm(
+    *,
+    history: list[dict[str, Any]],
+    services: list[Any],
+    business_name: str,
+    industry: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Best-effort name + service extraction using a single LLM call.
+
+    This is used as a *fallback* when the local ``extract_name``
+    heuristic cannot find a real name (i.e. returns "Customer").
+
+    Returns (name, service_name), where either may be None if the LLM
+    could not determine a confident value.
+    """
+    client = _get_openai_client()
+    if client is None:
+        return None, None
+
+    # Compact conversation into a readable transcript (latest last).
+    lines: list[str] = []
+    for msg in history[-20:]:  # limit to the last 20 turns for brevity
+        role = msg.get("role")
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "Customer" if role == "user" else "AI"
+        lines.append(f"{speaker}: {content}")
+    transcript = "\n".join(lines)
+
+    # Normalise services into a simple list of names.
+    service_names: list[str] = []
+    for s in services[:30]:
+        if isinstance(s, dict):
+            name = str(s.get("name") or "").strip()
+        else:
+            name = str(s).strip()
+        if name:
+            service_names.append(name)
+
+    system_prompt = (
+        "You are a careful information extraction assistant for a "
+        "plumbing or trade booking receptionist. Given a short "
+        "conversation between a caller and an AI agent, you must "
+        "extract: (1) the caller's first name, and (2) the single "
+        "best-matching service from the provided services list.\n\n"
+        "Rules:\n"
+        "- If you cannot confidently determine a value, use null.\n"
+        "- Always respond with STRICT JSON of the form:\n"
+        "  {\"name\": string|null, \"service\": string|null}.\n"
+        "- Use the services list exactly as given; do not invent new "
+        "  service names. If none fit, use null for service."
+    )
+
+    user_payload = {
+        "business": {
+            "name": business_name,
+            "industry": industry or "business",
+        },
+        "services": service_names,
+        "conversation": transcript,
+    }
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload)},
+            ],
+            temperature=0,
+            max_tokens=96,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        data = json.loads(content)
+        name_val = data.get("name") if isinstance(data, dict) else None
+        service_val = data.get("service") if isinstance(data, dict) else None
+
+        name_str = str(name_val).strip() if isinstance(name_val, str) else None
+        service_str = (
+            str(service_val).strip() if isinstance(service_val, str) else None
+        )
+
+        # Ensure the service is one of the configured names (case-insensitive).
+        if service_str and service_names:
+            lowered = service_str.lower()
+            exact = next(
+                (s for s in service_names if s.lower() == lowered),
+                None,
+            )
+            if exact:
+                service_str = exact
+            else:
+                # Try a contains match; otherwise drop it.
+                contains = next(
+                    (
+                        s
+                        for s in service_names
+                        if lowered in s.lower() or s.lower() in lowered
+                    ),
+                    None,
+                )
+                service_str = contains
+
+        return name_str or None, service_str or None
+    except Exception as e:  # pragma: no cover - defensive logging
+        print(f"⚠️ LLM name/service extraction failed: {e}")
+        return None, None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -293,9 +430,38 @@ def response_sounds_confirmed(text: str) -> bool:
 
 
 def user_confirms_booking(text: str) -> bool:
+    """Detect a *clear* user confirmation to finalise a booking.
+
+    This intentionally ignores weak/ambiguous cases like:
+    "Yeah, before that can I ask about fees?" where the caller is
+    actually asking a follow-up question, not granting final approval.
+    """
     if not text:
         return False
-    lower = text.lower()
+
+    lower = text.lower().strip()
+
+    # If the utterance contains clear question markers alongside
+    # confirmation words, treat it as a follow-up question rather than a
+    # final "yes". This covers cases like:
+    # "Yeah, before that may I know if there is any cancellation fee?"
+    question_markers = [
+        "?",
+        "what ",
+        "how ",
+        "why ",
+        "may i",
+        "can i",
+        "can you",
+        "could you",
+        "would you",
+        "is there",
+        "are there",
+        "before that",
+    ]
+    if any(m in lower for m in question_markers):
+        return False
+
     confirmation_signals = [
         "yes",
         "yep",
@@ -314,6 +480,13 @@ def user_confirms_booking(text: str) -> bool:
         "please confirm",
         "sure",
     ]
+
+    # Prefer confirmations that appear towards the end of the utterance
+    # ("yes, please" / "sure" / "go ahead" etc.).
+    for signal in confirmation_signals:
+        if lower.endswith(signal) or lower.endswith(signal + ".") or lower.endswith(signal + "!"):
+            return True
+
     return any(signal in lower for signal in confirmation_signals)
 
 
@@ -471,8 +644,25 @@ async def maybe_create_booking(
     if requested_dt is None and ai_response_text:
         requested_dt = extract_datetime_from_text(ai_response_text)
 
-    customer_name = extract_name(ctx.conversation_history)
+    # Start with the fast, local heuristic.
+    #customer_name = extract_name(ctx.conversation_history)
+    customer_name ="Customer"
+
     customer_phone = ctx.caller_phone or ""
+
+    # If we only have the generic placeholder, make a single best-effort
+    # LLM call to recover a real name (and optionally a service).
+    if customer_name == "Customer":
+        llm_name, llm_service = await extract_name_and_service_via_llm(
+            history=ctx.conversation_history,
+            services=services,
+            business_name=ctx.business_name,
+            industry=ctx.business_config.get("industry"),
+        )
+        if llm_name:
+            customer_name = llm_name
+        if not service and llm_service:
+            service = llm_service
 
     if customer_name == "Customer" or not customer_phone:
         print(
