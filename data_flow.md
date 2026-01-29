@@ -200,3 +200,10 @@ flowchart TD
 ---
 
 This flow should give you a concise map from **real-world events** (caller actions, Twilio messages, STT/LLM outputs) to the **core Python components** that handle each step.
+
+---
+
+## Notes on Recent Improvements
+
+- **Intent-based services**: Business services can now be seeded directly from the plumbing intent mapping sheet via `backend/app/services/intent_profiles.py` and the helper script `backend/scripts/update_business_services_from_intents.py`.
+- **Safer call end heuristics**: `CallSession._should_end_call` has been updated so that polite phrases like "thank you" or "thanks" do not, on their own, terminate a call; only explicit farewells (e.g. "bye", "that's all") combined with context will schedule call end, and any new user speech cancels a pending end.
