@@ -4,13 +4,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 
-#Import Routers
-from app.api.v1 import voice
+# Import Routers
 from app.api.v1 import calls
 from app.api.v1 import tts_admin
 from app.api.v1 import media_stream
 from app.api.v1 import onboarding
 from app.api.v1 import sms
+from app.api.v1.auth import google_calendar
 
 # Load environment variables
 load_dotenv()
@@ -30,13 +30,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-#Include routers
-app.include_router(voice.router, prefix="/voice", tags=["voice"])
+# Include routers
 app.include_router(calls.router, prefix="/api", tags=["calls"])
 app.include_router(tts_admin.router, prefix="/admin/tts", tags=["tts"])
 app.include_router(onboarding.router, prefix="/admin/onboarding", tags=["onboarding"])
 app.include_router(media_stream.router, prefix="/stream", tags=["streaming"])
 app.include_router(sms.router, prefix="/sms", tags=["sms"])
+app.include_router(google_calendar.router, prefix="/api/v1", tags=["google-calendar"])
 
 @app.get("/")
 async def root():

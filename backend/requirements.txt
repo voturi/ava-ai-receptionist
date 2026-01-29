@@ -35,6 +35,8 @@ python-dotenv==1.0.0
 pydantic==2.11.7
 pydantic-settings==2.1.0
 httpx==0.26.0
+cryptography==41.0.7
+aiohttp==3.9.1
 
 # Logging & Monitoring
 sentry-sdk[fastapi]==1.40.0

@@ -33,6 +33,20 @@ class Business(Base):
     services = Column(JSON, default=[])  # List of services offered
     working_hours = Column(JSON, default={})  # Business hours
     
+    # Google Calendar Integration
+    google_calendar_id = Column(String, nullable=True)  # e.g., "business@company.com"
+    google_refresh_token = Column(String, nullable=True)  # Encrypted
+    google_token_expires_at = Column(DateTime, nullable=True)
+    google_calendar_timezone = Column(String, default="Australia/Sydney")
+    
+    # Calendly Integration
+    calendly_api_key = Column(String, nullable=True)  # Encrypted
+    calendly_username = Column(String, nullable=True)
+    calendly_calendar_url = Column(String, nullable=True)
+    
+    # Calendar Sync Settings
+    auto_sync_bookings = Column(Boolean, default=True)  # Auto-create calendar events
+    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -10,8 +10,14 @@ from __future__ import annotations
 import os
 from typing import Any, AsyncGenerator, Callable, Optional
 import json
+from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
+
+from app.services.intent_profiles import IssueIntentProfile
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from app.services.intent_detector import DetectedIntent
 
 
 class StreamingAIService:
@@ -31,6 +37,8 @@ class StreamingAIService:
         self,
         business_name: str = "our business",
         business_config: Optional[dict] = None,
+        conversation_mode: Optional[str] = None,
+        issue_profile: Optional[IssueIntentProfile] = None,
     ) -> str:
         """
         System prompt optimized for voice conversations.
@@ -47,6 +55,34 @@ class StreamingAIService:
         industry = business_config.get("industry") or "business"
         services = business_config.get("services") or []
         working_hours = business_config.get("working_hours") or {}
+
+        # Conversation mode: guides how aggressively to push into booking.
+        # - "booking": caller has clearly asked to book/schedule.
+        # - "emergency_info": caller likely has an urgent issue; prioritise
+        #   safety and rapid dispatch over general chit-chat.
+        # - anything else / None: information & triage mode.
+        if conversation_mode == "booking":
+            mode_block = (
+                "CONVERSATION MODE (BOOKING):\n"
+                "- The caller has explicitly indicated they want to book, schedule, or reserve an appointment.\n"
+                "- You SHOULD guide them through the booking flow and collect all mandatory fields.\n"
+                "- Still answer any direct questions clearly before continuing the booking steps.\n"
+            )
+        elif conversation_mode == "emergency_info":
+            mode_block = (
+                "CONVERSATION MODE (EMERGENCY):\n"
+                "- The caller appears to have an urgent or emergency issue.\n"
+                "- FIRST, check safety and whether they can safely turn off water or gas.\n"
+                "- Collect the address and a short description of the emergency before anything else.\n"
+                "- Keep responses calm, direct, and focused on dispatching urgent help.\n"
+            )
+        else:
+            mode_block = (
+                "CONVERSATION MODE (INFO / TRIAGE):\n"
+                "- The caller has NOT clearly asked to book or schedule yet.\n"
+                "- DO NOT start the booking flow or ask for address, preferred day/time, name, or mobile number unless the caller clearly says they want to book, schedule, reserve, or make an appointment.\n"
+                "- Focus on understanding the issue and answering questions. After you answer, you may politely ask once if they would like to book a time.\n"
+            )
 
         tone = ai_config.get("tone", "warm, friendly, and professional")
         language = ai_config.get("language", "en-AU")
@@ -67,6 +103,23 @@ class StreamingAIService:
         policies_summary = business_config.get("policies_summary") or "Not provided."
         faqs_summary = business_config.get("faqs_summary") or "Not provided."
 
+        issue_block = ""
+        if issue_profile is not None:
+            cq_snippet = " ".join(issue_profile.clarifying_questions[:3]) if issue_profile.clarifying_questions else ""
+            jobs_summary = ", ".join(issue_profile.jobs_covered[:5]) if issue_profile.jobs_covered else "Not specified."
+            issue_block = (
+                "CURRENT CALL INTENT:\n"
+                f"- Workflow: {issue_profile.workflow}\n"
+                f"- Purpose: {issue_profile.purpose or 'Not specified.'}\n"
+                f"- Customer intent: {issue_profile.customer_intent or 'Not specified.'}\n"
+                f"- Typical jobs: {jobs_summary}\n"
+                "\nWhen speaking with the caller:\n"
+                f"- Treat this as a {issue_profile.workflow.lower()} scenario.\n"
+                "- Use the saved clarifying questions to quickly understand the job.\n"
+                f"- Example clarifying questions: {cq_snippet}\n"
+                f"- Follow this routing logic when positioning the job: {issue_profile.routing_logic or 'standard plumbing routing.'}\n"
+            )
+
         return f"""You are Echo, the AI receptionist for {business_name} ({industry}).
 Tone: {tone}. Language: {language}. Be warm and concise (1-2 sentences).
 
@@ -75,6 +128,10 @@ BUSINESS CONTEXT:
 - Hours: {working_hours_summary}
 - Policies: {policies_summary}
 - FAQs: {faqs_summary}
+
+{mode_block}
+
+{issue_block}
 
 TOOLS POLICY:
 - Use tools only for booking lookups when explicitly asked.
@@ -85,7 +142,7 @@ TRADIES BEHAVIOR:
 - Ask for job details: issue type, address/suburb, access notes, preferred time window.
 - Keep responses short and reassuring.
 
-BOOKING FLOW (mandatory fields):
+BOOKING FLOW (mandatory fields when the caller clearly wants to book):
 1. Service needed
 2. Preferred day
 3. Preferred time
@@ -93,8 +150,8 @@ BOOKING FLOW (mandatory fields):
 5. Customer mobile number (required for confirmation)
 6. Confirm all details before finalizing
 
-IMPORTANT: Always collect the mobile number before confirming a booking.
-If booking intent is detected, ask for missing fields in order and do not confirm until name and mobile are collected.
+When in booking mode, collect the mobile number before confirming a booking.
+Only begin collecting booking fields after the caller clearly indicates they want to book, schedule, reserve, or make an appointment.
 Once all details are collected, ask for explicit permission to finalize the booking (e.g., "Shall I go ahead and finalise that?") and wait for a yes.
 
 VOICE CONVERSATION RULES:
@@ -114,6 +171,7 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         user_message: str,
         conversation_history: Optional[list] = None,
         business_name: str = "our business",
+        conversation_mode: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream AI response token by token.
@@ -130,7 +188,15 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
             conversation_history = []
 
         messages = [
-            {"role": "system", "content": self.get_system_prompt(business_name)},
+            {
+                "role": "system",
+                "content": self.get_system_prompt(
+                    business_name,
+                    business_config=None,
+                    conversation_mode=conversation_mode,
+                    issue_profile=None,
+                ),
+            },
             *conversation_history,
             {"role": "user", "content": user_message},
         ]
@@ -160,6 +226,7 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         conversation_history: Optional[list] = None,
         business_name: str = "our business",
         min_chunk_size: int = 10,
+        conversation_mode: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream AI response with buffering for natural speech breaks.
@@ -179,6 +246,7 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
             user_message,
             conversation_history,
             business_name,
+            conversation_mode,
         ):
             buffer += token
 
@@ -216,6 +284,162 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         # Yield if buffer is getting too long
         return len(buffer) >= 50
 
+    async def classify_service(
+        self,
+        *,
+        user_utterances: list[str],
+        services: list[Any],
+        business_name: str = "our business",
+        industry: Optional[str] = None,
+    ) -> Optional[str]:
+        """Classify a customer's issue description into one configured service.
+
+        This is a lightweight, non-streaming helper used when heuristic
+        string-matching cannot confidently map the user's natural language
+        description (e.g. "leaking bathroom pipe and non-working flush")
+        to one of the configured services.
+
+        Returns the chosen service *name* (as configured on the business)
+        or None if a confident mapping cannot be made.
+        """
+        if not services or not user_utterances:
+            return None
+
+        # Normalise services into display names + optional descriptions
+        formatted_services: list[tuple[str, str]] = []
+        for service in services:
+            if isinstance(service, dict):
+                name = str(service.get("name") or "").strip()
+                desc = str(
+                    service.get("description")
+                    or service.get("details")
+                    or service.get("notes")
+                    or ""
+                ).strip()
+            else:
+                name = str(service).strip()
+                desc = ""
+            if not name:
+                continue
+            formatted_services.append((name, desc))
+
+        if not formatted_services:
+            return None
+
+        services_block = "\n".join(
+            f'- "{name}" - {desc}' if desc else f'- "{name}"'
+            for name, desc in formatted_services[:20]
+        )
+
+        # Use the last few user utterances as the issue description context
+        non_empty_utterances = [u.strip() for u in user_utterances if u and u.strip()]
+        if not non_empty_utterances:
+            return None
+
+        recent_snippet = "\n".join(
+            f"Customer: {utt}" for utt in non_empty_utterances[-3:]
+        )
+
+        system_prompt = (
+            "You are a classifier that maps a customer's plumbing or trade "
+            "issue description to exactly ONE of the business's configured "
+            "services.\n\n"
+            "Rules:\n"
+            "- Only choose from the provided services list.\n"
+            "- If more than one could fit, choose the *most* specific match.\n"
+            "- If none are appropriate, respond with null.\n"
+            "- Respond with STRICT JSON only, no explanation."
+        )
+
+        user_prompt = (
+            f"Business: {business_name} ({industry or 'business'})\n\n"
+            f"Available services:\n{services_block}\n\n"
+            f"Recent customer conversation:\n{recent_snippet}\n\n"
+            "Based on this, choose the single best matching service from the "
+            "list. If none apply, use null."
+        )
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+                max_tokens=64,
+            )
+
+            content = response.choices[0].message.content or ""
+            content = content.strip()
+
+            # Best effort: tolerate minor deviations like surrounding text
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                # Try to extract the first JSON object from the string
+                start = content.find("{")
+                end = content.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    try:
+                        parsed = json.loads(content[start : end + 1])
+                    except json.JSONDecodeError:
+                        print(f"⚠️ Could not parse service classification JSON: {content}")
+                        return None
+                else:
+                    print(f"⚠️ Unexpected service classification response: {content}")
+                    return None
+
+            # If the model returns bare null or a non-object (e.g. "null"),
+            # treat that as "no mapping" rather than raising.
+            if not isinstance(parsed, dict):
+                if parsed is None:
+                    return None
+                # If it's a raw string, we can try to interpret it as a
+                # service name directly; otherwise, give up safely.
+                if isinstance(parsed, str):
+                    raw_name_str = parsed.strip().lower()
+                    if not raw_name_str:
+                        return None
+                    for name, _ in formatted_services:
+                        if name.lower() == raw_name_str:
+                            return name
+                    for name, _ in formatted_services:
+                        if raw_name_str in name.lower() or name.lower() in raw_name_str:
+                            return name
+                    print(f"⚠️ Service classification returned unknown raw string: {parsed}")
+                    return None
+                print(f"⚠️ Service classification returned non-object JSON: {parsed}")
+                return None
+
+            raw_name = parsed.get("service_name")
+            if not raw_name:
+                return None
+
+            raw_name_str = str(raw_name).strip().lower()
+            if not raw_name_str:
+                return None
+
+            # Map back to the exact configured name (case-insensitive match)
+            for name, _ in formatted_services:
+                if name.lower() == raw_name_str:
+                    return name
+
+            # If the model returned something close but not exact, fall
+            # back to a more permissive contains match as a last resort.
+            for name, _ in formatted_services:
+                if raw_name_str in name.lower() or name.lower() in raw_name_str:
+                    return name
+
+            print(
+                f"⚠️ Service classification returned unknown name: {raw_name} from {content}"
+            )
+            return None
+
+        except Exception as e:  # pragma: no cover - defensive logging
+            print(f"❌ Service classification error: {e}")
+            return None
+
     async def stream_with_tools(
         self,
         user_message: str,
@@ -225,6 +449,8 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         tool_executor: Optional[Callable[[str, dict], Any]] = None,
         max_tool_calls: int = 2,
         prefetched_tools: Optional[list[dict]] = None,
+        conversation_mode: Optional[str] = None,
+        intent: Optional["DetectedIntent"] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Stream a response with tool calling.
@@ -236,9 +462,18 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         if conversation_history is None:
             conversation_history = []
 
+        # If an upstream intent detector has mapped this utterance to a
+        # domain-specific issue, pass that profile into the system prompt so
+        # the LLM can specialise its behaviour.
+        issue_profile: Optional[IssueIntentProfile] = None
+        if intent is not None:
+            issue_profile = getattr(intent, "issue_profile", None)
+
         system_prompt = self.get_system_prompt(
             business_name=(business_profile or {}).get("business_name", "our business"),
             business_config=business_profile or {},
+            conversation_mode=conversation_mode,
+            issue_profile=issue_profile,
         )
 
         messages = [
