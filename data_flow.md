@@ -155,15 +155,15 @@ flowchart TD
 
 - **Event**: Conversation indicates a booking is complete.
 - **Components**:
-  - `CallSession._maybe_create_booking`.
-  - `booking_logic.maybe_create_booking`.
-  - `DBService.create_booking`.
-  - `twilio_client.send_sms`.
+-  - `BookingWorkflow.handle_turn`.
+-  - `booking_logic.maybe_create_booking`.
+-  - `DBService.create_booking`.
+-  - `twilio_client.send_sms`.
 - **What they do**:
-  - Evaluate whether sufficient data exists to create a booking.
-  - Create a booking record tied to the current call.
-  - Send a confirmation SMS to the customer.
-  - Update call outcome/intent in the database.
+-  - BookingWorkflow inspects the latest AI/user turns and decides when to attempt booking creation.
+-  - `booking_logic.maybe_create_booking` evaluates whether sufficient data exists and, if so, creates a booking via `DBService.create_booking`.
+-  - A confirmation SMS is sent to the customer using `twilio_client.send_sms`.
+-  - Call outcome/intent is updated in the database.
 
 ### 9. Deciding to End the Call
 
@@ -200,3 +200,10 @@ flowchart TD
 ---
 
 This flow should give you a concise map from **real-world events** (caller actions, Twilio messages, STT/LLM outputs) to the **core Python components** that handle each step.
+
+---
+
+## Notes on Recent Improvements
+
+- **Intent-based services**: Business services can now be seeded directly from the plumbing intent mapping sheet via `backend/app/services/intent_profiles.py` and the helper script `backend/scripts/update_business_services_from_intents.py`.
+- **Safer call end heuristics**: `CallSession._should_end_call` has been updated so that polite phrases like "thank you" or "thanks" do not, on their own, terminate a call; only explicit farewells (e.g. "bye", "that's all") combined with context will schedule call end, and any new user speech cancels a pending end.
