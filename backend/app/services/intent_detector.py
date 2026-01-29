@@ -3,25 +3,49 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional, Any
 
+from app.services.intent_profiles import IssueIntentProfile, match_issue_intent
+
 
 IntentType = Literal["booking", "cancel", "reschedule", "info", "emergency", "other"]
 
 
 @dataclass
 class DetectedIntent:
-    """Lightweight intent classification result for a single utterance."""
+    """Lightweight intent classification result for a single utterance.
 
+    "intent" remains the high-level, workflow-driving label used
+    throughout the codebase (booking/cancel/reschedule/info/emergency/other).
+    Additional fields expose a richer, domain-specific issue intent that is
+    loaded from the plumbing intent mapping CSV.
+    """
+
+    # High-level intent used for workflows and conversation_mode
     intent: IntentType
+
+    # Confidence score for the high-level label (0–1)
     confidence: float
+
+    # Short machine-readable reason / source of the decision
     reason: str
+
+    # Optional domain-specific issue intent, mapped from the CSV
+    issue_id: Optional[str] = None
+    issue_confidence: float = 0.0
+    issue_profile: Optional[IssueIntentProfile] = None
+
+    # Optional debug payload for logging / inspection
     debug: Optional[dict[str, Any]] = None
 
 
 def detect_intent(user_text: str, history: Optional[list[dict[str, Any]]] = None) -> DetectedIntent:
     """Rule-based intent detection for voice calls.
 
-    This is intentionally simple and fast. It can be upgraded later to
-    a model-based classifier without changing the public shape.
+    This is intentionally simple and fast. It now has two layers:
+
+    - a cheap, rule-based high-level classifier (booking/cancel/etc.) used
+      for workflows and conversation control.
+    - a CSV-backed domain issue matcher that maps the utterance to one of
+      the configured plumbing workflows where possible.
     """
 
     text = (user_text or "").lower()
@@ -90,11 +114,22 @@ def detect_intent(user_text: str, history: Optional[list[dict[str, Any]]] = None
     if best_score == 0.0:
         best_intent = "other"
 
+    # Domain-level issue matching using the CSV mapping.
+    issue_profile, issue_confidence = match_issue_intent(user_text or "")
+
     reason = f"rule_match:{best_intent}" if best_score > 0 else "no_match"
+
+    debug_payload: dict[str, Any] = {"scores": scores}
+    if issue_profile is not None:
+        debug_payload["issue_id"] = issue_profile.id
+        debug_payload["issue_confidence"] = issue_confidence
 
     return DetectedIntent(
         intent=best_intent,
         confidence=best_score,
         reason=reason,
-        debug={"scores": scores} if scores else None,
+        issue_id=issue_profile.id if issue_profile else None,
+        issue_confidence=issue_confidence,
+        issue_profile=issue_profile,
+        debug=debug_payload or None,
     )

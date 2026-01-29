@@ -456,6 +456,7 @@ async def maybe_create_booking(
         return {"created": True, "confirmation_text": None, "booking_id": None}
 
     if not ctx.call_id:
+        print("🔎 Booking blocked: missing_call_id")
         return {"created": False, "confirmation_text": None, "booking_id": None}
 
     if not user_confirms_booking(user_text or ""):
@@ -490,10 +491,12 @@ async def maybe_create_booking(
         return {"created": False, "confirmation_text": None, "booking_id": None}
 
     # Service/category is best-effort. If we couldn't reliably map it to a
-    # configured service, fall back to a sensible generic label; the
-    # detailed issue is still captured in customer_notes.
+    # configured service, fall back to a generic label. The detailed
+    # natural-language description is still captured separately in
+    # customer_notes, so we avoid leaking freeform phrases like
+    # "yes please, confirm the booking" into the service field or SMS.
     if not service:
-        service = extract_issue_summary(ctx.conversation_history) or "General"
+        service = "General"
 
     provider_config = get_provider_config(ctx.business_config.get("ai_config"))
     provider = resolve_provider(provider_config)
@@ -545,10 +548,19 @@ async def maybe_create_booking(
 
     try:
         booking_date = booking_datetime.strftime("%A %d %b %Y at %I:%M %p")
-        sms_message = (
-            f"Hi {customer_name}! Your {service or 'service'} appointment at "
-            f"{ctx.business_name} is confirmed for {booking_date}."
-        )
+        # Only include the service name in the SMS when we have a meaningful
+        # label (e.g. from the configured services list). For generic
+        # fallbacks like "General", keep the message simple.
+        if service and service.lower() != "general":
+            sms_message = (
+                f"Hi {customer_name}! Your {service} appointment at "
+                f"{ctx.business_name} is confirmed for {booking_date}."
+            )
+        else:
+            sms_message = (
+                f"Hi {customer_name}! Your appointment at "
+                f"{ctx.business_name} is confirmed for {booking_date}."
+            )
         if intent.message_override:
             sms_message = intent.message_override
         twilio_client.send_sms(

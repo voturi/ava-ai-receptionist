@@ -346,8 +346,11 @@ class CallSession:
                     sample_rate=8000,
                     encoding="mulaw",
                     interim_results=True,
-                    utterance_end_ms=2000,  # Wait 2s of silence before UtteranceEnd (allows thinking pauses)
-                    endpointing=2500,  # FIX #3: Increased from 1000ms to 2500ms to allow natural speech pauses
+                    # Wait 3s of silence before UtteranceEnd (allows longer, more natural pauses)
+                    utterance_end_ms=3000,
+                    # Endpointing slightly higher than utterance_end_ms so Deepgram
+                    # is less eager to cut the caller off mid-thought.
+                    endpointing=3500,
                 ),
             )
             await self.stt_connection.connect()
@@ -466,12 +469,24 @@ class CallSession:
         user_lower = user_text.lower()
         ai_lower = ai_response.lower()
 
-        # User farewell signals - strong indicators to end call
-        user_farewell = any(word in user_lower for word in [
-            "thank you", "thanks", "bye", "goodbye", "that's all",
-            "that's it", "cheers", "ta", "see you", "have a good",
-            "thanks for", "appreciate"
-        ])
+        # User farewell signals - strong indicators to end call.
+        # NOTE: Polite phrases like "thank you" or "thanks" can occur
+        # mid-conversation, so we no longer treat them alone as a signal
+        # to hang up. We only consider more explicit conversation-closure
+        # phrases (bye / goodbye / that's all / that's it / see you / have a good...).
+        has_goodbye = any(
+            phrase in user_lower
+            for phrase in [
+                "bye",
+                "goodbye",
+                "that's all",
+                "that's it",
+                "see you",
+                "have a good",
+                "have a great",
+            ]
+        )
+        user_farewell = has_goodbye
 
         # AI farewell signals (end of conversation)
         ai_farewell = any(word in ai_lower for word in [
@@ -731,9 +746,10 @@ class CallSession:
             utterance: The user's spoken text
         """
         try:
-            # Grace period: wait 500ms to see if user speaks again
-            # This prevents processing incomplete thoughts
-            await asyncio.sleep(0.5)
+            # Grace period: wait a bit longer to see if the caller continues
+            # the same thought. 800ms is a balance between responsiveness and
+            # avoiding mid-sentence cut-offs.
+            await asyncio.sleep(0.8)
 
             # If we've already scheduled the call to end, ignore any
             # further utterances to avoid reopening the conversation
@@ -760,12 +776,15 @@ class CallSession:
         self.is_user_speaking = True
 
         # If a call end has already been scheduled (after a goodbye or
-        # booking confirmation), do not cancel it. We deliberately ignore
-        # late speech here to avoid re-opening the conversation and
-        # creating a confusing UX.
+        # booking confirmation) but the caller starts speaking again,
+        # treat this as a signal that they are not actually done.
+        # Cancel the pending end so the conversation can continue.
         if self.pending_end_call:
-            print("🛑 Speech detected after call end scheduled; ignoring")
-            return
+            print("🛑 Speech detected after call end scheduled; cancelling pending end")
+            self.pending_end_call = False
+            if self._end_call_task and not self._end_call_task.done():
+                self._end_call_task.cancel()
+            # Fall through and allow normal barge-in handling below.
 
         # Barge-in: If AI is speaking and user starts talking, clear buffer
         if self.is_ai_speaking:

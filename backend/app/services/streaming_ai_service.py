@@ -10,8 +10,14 @@ from __future__ import annotations
 import os
 from typing import Any, AsyncGenerator, Callable, Optional
 import json
+from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
+
+from app.services.intent_profiles import IssueIntentProfile
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from app.services.intent_detector import DetectedIntent
 
 
 class StreamingAIService:
@@ -32,6 +38,7 @@ class StreamingAIService:
         business_name: str = "our business",
         business_config: Optional[dict] = None,
         conversation_mode: Optional[str] = None,
+        issue_profile: Optional[IssueIntentProfile] = None,
     ) -> str:
         """
         System prompt optimized for voice conversations.
@@ -51,6 +58,8 @@ class StreamingAIService:
 
         # Conversation mode: guides how aggressively to push into booking.
         # - "booking": caller has clearly asked to book/schedule.
+        # - "emergency_info": caller likely has an urgent issue; prioritise
+        #   safety and rapid dispatch over general chit-chat.
         # - anything else / None: information & triage mode.
         if conversation_mode == "booking":
             mode_block = (
@@ -58,6 +67,14 @@ class StreamingAIService:
                 "- The caller has explicitly indicated they want to book, schedule, or reserve an appointment.\n"
                 "- You SHOULD guide them through the booking flow and collect all mandatory fields.\n"
                 "- Still answer any direct questions clearly before continuing the booking steps.\n"
+            )
+        elif conversation_mode == "emergency_info":
+            mode_block = (
+                "CONVERSATION MODE (EMERGENCY):\n"
+                "- The caller appears to have an urgent or emergency issue.\n"
+                "- FIRST, check safety and whether they can safely turn off water or gas.\n"
+                "- Collect the address and a short description of the emergency before anything else.\n"
+                "- Keep responses calm, direct, and focused on dispatching urgent help.\n"
             )
         else:
             mode_block = (
@@ -86,6 +103,23 @@ class StreamingAIService:
         policies_summary = business_config.get("policies_summary") or "Not provided."
         faqs_summary = business_config.get("faqs_summary") or "Not provided."
 
+        issue_block = ""
+        if issue_profile is not None:
+            cq_snippet = " ".join(issue_profile.clarifying_questions[:3]) if issue_profile.clarifying_questions else ""
+            jobs_summary = ", ".join(issue_profile.jobs_covered[:5]) if issue_profile.jobs_covered else "Not specified."
+            issue_block = (
+                "CURRENT CALL INTENT:\n"
+                f"- Workflow: {issue_profile.workflow}\n"
+                f"- Purpose: {issue_profile.purpose or 'Not specified.'}\n"
+                f"- Customer intent: {issue_profile.customer_intent or 'Not specified.'}\n"
+                f"- Typical jobs: {jobs_summary}\n"
+                "\nWhen speaking with the caller:\n"
+                f"- Treat this as a {issue_profile.workflow.lower()} scenario.\n"
+                "- Use the saved clarifying questions to quickly understand the job.\n"
+                f"- Example clarifying questions: {cq_snippet}\n"
+                f"- Follow this routing logic when positioning the job: {issue_profile.routing_logic or 'standard plumbing routing.'}\n"
+            )
+
         return f"""You are Echo, the AI receptionist for {business_name} ({industry}).
 Tone: {tone}. Language: {language}. Be warm and concise (1-2 sentences).
 
@@ -96,6 +130,8 @@ BUSINESS CONTEXT:
 - FAQs: {faqs_summary}
 
 {mode_block}
+
+{issue_block}
 
 TOOLS POLICY:
 - Use tools only for booking lookups when explicitly asked.
@@ -156,7 +192,9 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
                 "role": "system",
                 "content": self.get_system_prompt(
                     business_name,
+                    business_config=None,
                     conversation_mode=conversation_mode,
+                    issue_profile=None,
                 ),
             },
             *conversation_history,
@@ -412,6 +450,7 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         max_tool_calls: int = 2,
         prefetched_tools: Optional[list[dict]] = None,
         conversation_mode: Optional[str] = None,
+        intent: Optional["DetectedIntent"] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Stream a response with tool calling.
@@ -423,10 +462,18 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
         if conversation_history is None:
             conversation_history = []
 
+        # If an upstream intent detector has mapped this utterance to a
+        # domain-specific issue, pass that profile into the system prompt so
+        # the LLM can specialise its behaviour.
+        issue_profile: Optional[IssueIntentProfile] = None
+        if intent is not None:
+            issue_profile = getattr(intent, "issue_profile", None)
+
         system_prompt = self.get_system_prompt(
             business_name=(business_profile or {}).get("business_name", "our business"),
             business_config=business_profile or {},
             conversation_mode=conversation_mode,
+            issue_profile=issue_profile,
         )
 
         messages = [

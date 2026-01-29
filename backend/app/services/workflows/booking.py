@@ -37,8 +37,15 @@ class BookingWorkflow:
     ) -> WorkflowResult:
         result = WorkflowResult()
 
-        # Only run booking behaviour when the effective workflow is booking
-        if effective_intent != "booking":
+        # Prefer to run booking behaviour when the workflow thinks this call
+        # is booking-related, but also allow it to react when the LLM clearly
+        # enters booking mode (e.g. asking to finalise a booking) even if the
+        # high-level intent classifier still reports "info"/"other".
+        if (
+            effective_intent not in {"booking", "cancel", "reschedule"}
+            and not booking_logic.response_requests_finalization(full_response)
+            and not booking_logic.response_sounds_confirmed(full_response)
+        ):
             return result
 
         booking_result: dict = {"created": False, "confirmation_text": None, "booking_id": None}
@@ -48,6 +55,7 @@ class BookingWorkflow:
         # Attempt booking creation only after we explicitly asked to finalize.
         asks_finalization = booking_logic.response_requests_finalization(full_response)
         if asks_finalization:
+            print("🧩 BookingWorkflow: LLM asked to finalise booking; awaiting_final_confirmation=TRUE")
             session.awaiting_final_confirmation = True
 
         # Opportunistically populate structured booking_state fields

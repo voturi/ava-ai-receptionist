@@ -76,17 +76,29 @@ class ConversationEngine:
                 session.primary_intent = intent.intent
 
         effective_intent = session.primary_intent or intent.intent
+        issue_part = (
+            f", issue_id={intent.issue_id} (issue_conf={intent.issue_confidence:.2f})"
+            if getattr(intent, "issue_id", None)
+            else ""
+        )
         print(
-            f"🧭 Detected intent: {intent.intent} (conf={intent.confidence:.2f}), "
-            f"primary={session.primary_intent or '-'}, effective={effective_intent}"
+            f"🧭 Detected intent: {intent.intent} (conf={intent.confidence:.2f})"  # high-level
+            f"{issue_part}, primary={session.primary_intent or '-'}, effective={effective_intent}"
         )
 
         # LLM conversation mode is per-utterance and slightly different from
         # the sticky primary intent used for workflows. For this turn:
         # - if the user explicitly sounds like booking, use "booking" mode
+        # - if the user clearly sounds like an emergency, use a dedicated
+        #   emergency mode to tighten safety instructions.
         # - otherwise, treat as information/triage so we don't over-push
         #   booking details while answering questions.
-        llm_conversation_mode = "booking" if intent.intent == "booking" else "info"
+        if intent.intent == "booking":
+            llm_conversation_mode = "booking"
+        elif intent.intent == "emergency":
+            llm_conversation_mode = "emergency_info"
+        else:
+            llm_conversation_mode = "info"
 
         # Track timing
         llm_start = datetime.utcnow()
@@ -107,6 +119,7 @@ class ConversationEngine:
                 max_tool_calls=2,
                 prefetched_tools=prefetched_tools,
                 conversation_mode=llm_conversation_mode,
+                intent=intent,
             ):
                 if event.get("type") == "tool_call":
                     session.tool_history.append(event)
