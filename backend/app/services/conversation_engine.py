@@ -11,7 +11,6 @@ from app.services.streaming_ai_service import streaming_ai_service
 from app.services.workflows import (
     BookingWorkflow,
     InfoPolicyWorkflow,
-    AvailabilityWorkflow,
     WorkflowResult,
 )
 from app.tools.tool_definitions import TOOLS
@@ -171,17 +170,6 @@ class ConversationEngine:
                 effective_intent=effective_intent,
             )
 
-            # Then run availability workflow for generic availability
-            # questions based on working_hours.
-            availability_workflow = AvailabilityWorkflow()
-            availability_result: WorkflowResult = await availability_workflow.handle_turn(
-                user_text=user_text,
-                full_response=full_response,
-                session=session,
-                intent=intent,
-                effective_intent=effective_intent,
-            )
-
             # Then run booking workflow (or no-op if effective intent is not booking)
             booking_workflow = BookingWorkflow()
             booking_result: WorkflowResult = await booking_workflow.handle_turn(
@@ -193,11 +181,9 @@ class ConversationEngine:
             )
 
             # Speak any backend-driven messages (e.g. corrections,
-            # confirmations, or policy/availability info) after the
-            # streamed LLM output.
+            # confirmations, or policy info) after the streamed LLM output.
             for msg in (
                 info_result.backend_messages
-                + availability_result.backend_messages
                 + booking_result.backend_messages
             ):
                 await session.speak(msg)

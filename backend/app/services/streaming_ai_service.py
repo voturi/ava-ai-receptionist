@@ -373,22 +373,45 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
             content = response.choices[0].message.content or ""
             content = content.strip()
 
-            # Best effort: tolerate minor deviations like surrounding text
+            # Best effort: tolerate minor deviations like surrounding text,
+            # including Markdown code fences (```json ... ```), bare strings,
+            # or full JSON objects.
+            def _strip_code_fences(text: str) -> str:
+                if text.startswith("```") and text.endswith("```"):
+                    # Remove leading ```lang (if present) and trailing ```
+                    inner = text.strip("`")  # quick fallback
+                    # More robust: strip first line starting with ``` and last ``` line
+                    lines = text.splitlines()
+                    if lines and lines[0].lstrip().startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip().startswith("```"):
+                        lines = lines[:-1]
+                    return "\n".join(lines).strip()
+                return text
+
+            raw = _strip_code_fences(content)
+
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(raw)
             except json.JSONDecodeError:
                 # Try to extract the first JSON object from the string
-                start = content.find("{")
-                end = content.rfind("}")
+                start = raw.find("{")
+                end = raw.rfind("}")
                 if start != -1 and end != -1 and end > start:
                     try:
-                        parsed = json.loads(content[start : end + 1])
+                        parsed = json.loads(raw[start : end + 1])
                     except json.JSONDecodeError:
-                        print(f"⚠️ Could not parse service classification JSON: {content}")
+                        print(f"⚠️ Could not parse service classification JSON: {raw}")
                         return None
                 else:
-                    print(f"⚠️ Unexpected service classification response: {content}")
-                    return None
+                    # As a fallback, treat the stripped text as a raw name
+                    # string (e.g. "Water Leaks & Pressure Issues").
+                    stripped = raw.strip().strip("` ")
+                    if stripped:
+                        parsed = stripped
+                    else:
+                        print(f"⚠️ Unexpected service classification response: {content}")
+                        return None
 
             # If the model returns bare null or a non-object (e.g. "null"),
             # treat that as "no mapping" rather than raising.
@@ -582,14 +605,19 @@ If unsure about anything, say "Let me check on that for you" and keep it brief."
             break
 
     def _validate_tool_args(self, tool_name: str, tool_args: dict) -> Optional[str]:
-        """Validate tool args and return a user prompt if required fields are missing."""
+        """Validate tool args and return a user prompt if required fields are missing.
+
+        Note: For tools like ``get_latest_booking`` we deliberately avoid
+        prompting for a mobile number here. The ToolRouter already falls
+        back to the caller's phone when ``customer_phone`` is omitted, so
+        asking the user again would be redundant and confusing.
+        """
         if tool_name in {"get_policies", "get_faqs"}:
             if not tool_args.get("topic"):
                 return "Which topic should I check? For example: cancellation, pricing, or parking."
         if tool_name == "get_booking_by_id" and not tool_args.get("booking_id"):
             return "Do you have the booking ID?"
-        if tool_name == "get_latest_booking" and not tool_args.get("customer_phone"):
-            return "Can I grab the mobile number on the booking?"
+        # get_latest_booking: no explicit validation here; caller_phone is used implicitly.
         return None
 
 

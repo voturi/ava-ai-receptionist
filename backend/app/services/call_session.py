@@ -147,6 +147,9 @@ class CallSession:
     pending_end_call: bool = False
     pending_end_mark: str = "end_call"
     awaiting_final_confirmation: bool = False
+    # Once a "hard" end condition is met (e.g. explicit goodbye),
+    # we lock the call end so that late noise does not cancel it.
+    hard_end_locked: bool = False
 
     # Metrics
     metrics: CallMetrics = field(default_factory=lambda: CallMetrics(call_sid=""))
@@ -499,11 +502,15 @@ class CallSession:
         # 1. User says goodbye - always end (most reliable signal)
         if user_farewell:
             print(f"📞 Call ending detected (User farewell): '{user_text}'")
+            # Lock hard end so later background noise doesn't reopen call
+            self.hard_end_locked = True
             return True
         
         # 2. AI farewell after booking confirmed
         if ai_farewell and booking_state:
             print(f"📞 Call ending detected (AI farewell after booking): '{ai_response}'")
+            # Also treat this as a hard end: AI has clearly closed the call
+            self.hard_end_locked = True
             return True
 
         return False
@@ -776,10 +783,18 @@ class CallSession:
         self.is_user_speaking = True
 
         # If a call end has already been scheduled (after a goodbye or
-        # booking confirmation) but the caller starts speaking again,
-        # treat this as a signal that they are not actually done.
-        # Cancel the pending end so the conversation can continue.
+        # booking confirmation), decide whether to treat this as noise or
+        # as an intentional continuation.
         if self.pending_end_call:
+            if self.hard_end_locked:
+                # Hard end already decided (explicit goodbye). Ignore
+                # late speech/noise and let the call end proceed.
+                print("🛑 Speech detected after hard call end scheduled; ignoring")
+                return
+
+            # For softer end cases (if we ever add them back), allow
+            # new speech to cancel the pending end so the conversation
+            # can continue.
             print("🛑 Speech detected after call end scheduled; cancelling pending end")
             self.pending_end_call = False
             if self._end_call_task and not self._end_call_task.done():
