@@ -11,8 +11,8 @@ DATABASE_URL = DATABASE_URL.replace("postgresql", "postgresql+asyncpg")
 # Create async engine
 engine = create_async_engine(
     DATABASE_URL,
-    echo=True,  # Set to False in production
-    future=True
+    echo=os.getenv("SQLALCHEMY_ECHO", "false").lower() in {"1", "true", "yes"},
+    future=True,
 )
 
 # Create session factory

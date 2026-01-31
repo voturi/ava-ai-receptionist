@@ -4,12 +4,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 
+# Vapi integration router
+from app.integrations.vapi.webhook import router as vapi_router
+
 # Import Routers
 from app.api.v1 import calls
 from app.api.v1 import tts_admin
 from app.api.v1 import media_stream
 from app.api.v1 import onboarding
 from app.api.v1 import sms
+from app.api.v1 import appointments
 from app.api.v1.auth import google_calendar
 
 # Load environment variables
@@ -36,16 +40,25 @@ app.include_router(tts_admin.router, prefix="/admin/tts", tags=["tts"])
 app.include_router(onboarding.router, prefix="/admin/onboarding", tags=["onboarding"])
 app.include_router(media_stream.router, prefix="/stream", tags=["streaming"])
 app.include_router(sms.router, prefix="/sms", tags=["sms"])
+app.include_router(appointments.router, tags=["appointments"])
 app.include_router(google_calendar.router, prefix="/api/v1", tags=["google-calendar"])
+# Vapi Server URL handler (assistant-request, tool-calls, end-of-call-report)
+app.include_router(vapi_router, tags=["vapi"])
+
+# ----------------------------------------------------------------------------
+# Root + health endpoints (non-Vapi)
+# ----------------------------------------------------------------------------
+
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
+    """Root endpoint for browser/health checks (GET only)."""
     return {
         "message": "AI Receptionist API",
         "version": "1.0.0",
-        "status": "running"
+        "status": "running",
     }
+
 
 @app.get("/health")
 async def health():
